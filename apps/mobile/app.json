@@ -1,0 +1,26 @@
+{
+  "expo": {
+    "name": "MyPi",
+    "slug": "mypi",
+    "version": "0.1.0",
+    "orientation": "portrait",
+    "userInterfaceStyle": "dark",
+    "scheme": "mypi",
+    "ios": {
+      "supportsTablet": true,
+      "bundleIdentifier": "dev.mypi.app",
+      "infoPlist": {
+        "NSAppTransportSecurity": {
+          "NSAllowsArbitraryLoads": true
+        }
+      }
+    },
+    "android": {
+      "package": "dev.mypi.app",
+      "usesCleartextTraffic": true
+    },
+    "web": {
+      "bundler": "metro"
+    }
+  }
+}

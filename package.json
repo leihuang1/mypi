@@ -1,0 +1,20 @@
+{
+  "name": "mypi-monorepo",
+  "private": true,
+  "version": "0.1.0",
+  "description": "MyPi: Pi Durable companion server & React Native (Android/iOS/Web) client",
+  "workspaces": [
+    "packages/*",
+    "apps/*"
+  ],
+  "scripts": {
+    "server:dev": "npm --workspace=@mypi/server run dev",
+    "server:start": "npm --workspace=@mypi/server run start",
+    "mobile:start": "npm --workspace=@mypi/mobile run start",
+    "mobile:android": "npm --workspace=@mypi/mobile run android",
+    "mobile:ios": "npm --workspace=@mypi/mobile run ios",
+    "mobile:web": "npm --workspace=@mypi/mobile run web",
+    "check": "npm --workspace=@mypi/shared run check && npm --workspace=@mypi/server run check && npm --workspace=@mypi/mobile run check",
+    "test": "npm --workspace=@mypi/shared run test && npm --workspace=@mypi/server run test"
+  }
+}

@@ -1,0 +1,31 @@
+{
+  "name": "@mypi/mobile",
+  "version": "0.1.0",
+  "private": true,
+  "main": "index.js",
+  "scripts": {
+    "start": "ANDROID_HOME=${ANDROID_HOME:-$HOME/Library/Android/sdk} PATH=\"$PATH:${ANDROID_HOME:-$HOME/Library/Android/sdk}/platform-tools\" expo start",
+    "android": "ANDROID_HOME=${ANDROID_HOME:-$HOME/Library/Android/sdk} PATH=\"$PATH:${ANDROID_HOME:-$HOME/Library/Android/sdk}/platform-tools\" sh -c 'adb reverse tcp:8081 tcp:8081 >/dev/null 2>&1 || true; adb reverse tcp:4780 tcp:4780 >/dev/null 2>&1 || true; expo start --android --localhost'",
+    "ios": "expo start --ios",
+    "web": "expo start --web",
+    "check": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@expo/metro-runtime": "~4.0.1",
+    "@mypi/shared": "*",
+    "@react-native-async-storage/async-storage": "1.23.1",
+    "expo": "~52.0.37",
+    "expo-camera": "~16.0.18",
+    "expo-status-bar": "~2.0.1",
+    "react": "18.3.1",
+    "react-dom": "18.3.1",
+    "react-native": "0.76.7",
+    "react-native-safe-area-context": "4.12.0",
+    "react-native-web": "~0.19.13"
+  },
+  "devDependencies": {
+    "@babel/core": "^7.25.2",
+    "@types/react": "~18.3.12",
+    "typescript": "^5.7.2"
+  }
+}
