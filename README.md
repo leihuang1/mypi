@@ -1,5 +1,7 @@
 # MyPi: Pi Durable Mobile Companion (Android / iOS / Web)
 
+> **⚠️ Note**: This is a **personal, experimental toy project** built for my own workflow and tinkering. Expect rough edges, breaking changes, and zero production guarantees.
+
 MyPi lets you run durable [Pi](https://pi.dev) coding sessions on your development machine (`@earendil-works/pi-durable`) and seamlessly watch, steer, and review Git diffs from your **Android** or **iOS** phone over LAN Wi‑Fi or Tailscale.
 
 ## Architecture
