@@ -17,8 +17,19 @@
     },
     "android": {
       "package": "dev.mypi.app",
-      "usesCleartextTraffic": true
+      "usesCleartextTraffic": true,
+      "permissions": [
+        "android.permission.CAMERA"
+      ]
     },
+    "plugins": [
+      [
+        "expo-camera",
+        {
+          "cameraPermission": "Allow MyPi to access your camera to scan server pairing QR codes."
+        }
+      ]
+    ],
     "web": {
       "bundler": "metro"
     }
