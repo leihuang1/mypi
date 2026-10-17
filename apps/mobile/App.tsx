@@ -159,7 +159,14 @@ export default function App() {
       ) : screen === "session-detail" && activeSession ? (
         <SessionDetailScreen
           client={client}
+          device={device ?? undefined}
           session={activeSession}
+          onSessionUpdated={(updated) => {
+            setActiveSession(updated);
+            setSessions((prev) =>
+              prev.map((s) => (s.id === updated.id ? updated : s)),
+            );
+          }}
           onBack={() => {
             setActiveSession(null);
             setScreen("sessions");

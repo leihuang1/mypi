@@ -1,3 +1,4 @@
+import { execFile } from "node:child_process";
 import crypto from "node:crypto";
 import fs from "node:fs";
 import { createServer } from "node:http";
@@ -7,6 +8,47 @@ import qrcode from "qrcode-terminal";
 import { loadPiModelsAndAuth } from "./auth-loader.js";
 import { HarnessManager } from "./harness-mgr.js";
 import { createRequestHandler } from "./routes.js";
+
+function resolveAdbBinary(): string | null {
+  const candidates = [
+    process.env.ANDROID_HOME
+      ? path.join(process.env.ANDROID_HOME, "platform-tools", "adb")
+      : "",
+    path.join(os.homedir(), "Library", "Android", "sdk", "platform-tools", "adb"),
+    "/opt/homebrew/bin/adb",
+    "/usr/local/bin/adb",
+  ].filter(Boolean);
+
+  for (const candidate of candidates) {
+    if (fs.existsSync(candidate)) {
+      return candidate;
+    }
+  }
+  return null;
+}
+
+function startAdbReverseKeepAlive(ports: number[]): () => void {
+  const adbBin = resolveAdbBinary();
+  if (!adbBin) return () => {};
+
+  const applyReverse = () => {
+    for (const p of ports) {
+      execFile(
+        adbBin,
+        ["reverse", `tcp:${p}`, `tcp:${p}`],
+        { timeout: 2000 },
+        () => {
+          // Ignore when no USB device is attached
+        },
+      );
+    }
+  };
+
+  applyReverse();
+  const timer = setInterval(applyReverse, 3000);
+  timer.unref?.();
+  return () => clearInterval(timer);
+}
 
 function loadOrCreateToken(dataDir: string): string {
   if (process.env.MYPI_TOKEN?.trim()) {
@@ -83,8 +125,10 @@ export async function startMyPiServer(options?: {
   });
 
   const actualPort = (server.address() as { port: number }).port;
+  let stopAdbKeepAlive = () => {};
 
   if (!options?.silent) {
+    stopAdbKeepAlive = startAdbReverseKeepAlive([actualPort, 8081]);
     const { lan, tailscale } = getLocalNetworkAddresses();
     const candidateIps = [...lan, ...tailscale, "127.0.0.1"];
     const primaryUrl = `http://${candidateIps[0]}:${actualPort}`;
@@ -126,6 +170,7 @@ export async function startMyPiServer(options?: {
     manager,
     close: () =>
       new Promise<void>((resolve) => {
+        stopAdbKeepAlive();
         server.close(() => resolve());
       }),
   };

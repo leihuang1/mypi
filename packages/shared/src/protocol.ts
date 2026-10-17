@@ -26,6 +26,16 @@ export interface DeviceInfo {
   defaultModel: ModelRef;
   defaultThinkingLevel: ThinkingLevel;
   startDirs: string[];
+  recentDirs?: string[];
+  bookmarks?: string[];
+}
+
+export interface FileEntrySummary {
+  name: string;
+  path: string;
+  size: number;
+  mtime: number;
+  isHidden: boolean;
 }
 
 export interface DirectoryListing {
@@ -35,7 +45,52 @@ export interface DirectoryListing {
     name: string;
     path: string;
     isGitRepo: boolean;
+    isHidden?: boolean;
   }>;
+  files?: FileEntrySummary[];
+  recentDirs?: string[];
+  bookmarks?: string[];
+}
+
+export interface CreateDirectoryRequest {
+  parentPath?: string;
+  name?: string;
+  path?: string;
+  gitInit?: boolean;
+}
+
+export interface CreateDirectoryResponse {
+  path: string;
+  isGitRepo: boolean;
+}
+
+export interface GitCloneRequest {
+  targetParentDir: string;
+  repoUrl: string;
+  folderName?: string;
+}
+
+export interface GitCloneResponse {
+  path: string;
+  isGitRepo: boolean;
+}
+
+export interface UpdateBookmarkRequest {
+  path: string;
+  bookmarked: boolean;
+}
+
+export interface UpdateBookmarkResponse {
+  bookmarks: string[];
+}
+
+export interface FilePreviewResponse {
+  path: string;
+  name: string;
+  size: number;
+  truncated: boolean;
+  isBinary: boolean;
+  content: string;
 }
 
 export interface SessionSummary {
@@ -59,8 +114,31 @@ export interface CreateSessionRequest {
 
 export interface UpdateSessionRequest {
   name?: string;
+  cwd?: string;
   model?: ModelRef;
   thinkingLevel?: ThinkingLevel;
+}
+
+export interface CompactSessionRequest {
+  instructions?: string;
+}
+
+export interface CompactSessionResponse {
+  taskId: number;
+  status: "started";
+}
+
+export interface ResetSessionRequest {
+  handoff?: string;
+}
+
+export interface ResetSessionResponse {
+  status: "reset";
+}
+
+export interface AbortSubmissionResponse {
+  submissionId: number;
+  status: "aborted" | "already_placed" | "settled" | "not_found";
 }
 
 export interface SendMessageRequest {
@@ -127,13 +205,55 @@ export type TranscriptItem =
 export interface QueuedSubmissionItem {
   id: number;
   mode: "steer" | "followUp";
+  text?: string;
 }
 
 export interface UsageSummary {
   inputTokens: number;
   outputTokens: number;
+  cacheReadTokens: number;
+  cacheWriteTokens: number;
   totalTokens: number;
   totalCost: number;
+  contextTokens: number;
+}
+
+export interface OpenAIRateLimitSnapshot {
+  limitRequests?: number;
+  remainingRequests?: number;
+  resetRequests?: string;
+  limitTokens?: number;
+  remainingTokens?: number;
+  resetTokens?: string;
+  rawHeaders?: Record<string, string>;
+  updatedAt: number;
+}
+
+export interface OpenAIAccountUsageResponse {
+  provider: "openai";
+  configured: boolean;
+  authType: "oauth" | "api_key" | "none";
+  subscriptionLabel?: string;
+  tokenExpiresAt?: number;
+  dashboardUrl: string;
+  rateLimits?: OpenAIRateLimitSnapshot;
+  ledger: {
+    sessionCount: number;
+    inputTokens: number;
+    outputTokens: number;
+    cacheReadTokens: number;
+    cacheWriteTokens: number;
+    totalTokens: number;
+    totalCost: number;
+    byModel: Array<{
+      modelId: string;
+      inputTokens: number;
+      outputTokens: number;
+      totalTokens: number;
+      totalCost: number;
+    }>;
+  };
+  updatedAt: number;
 }
 
 export interface SessionLiveState {
@@ -228,6 +348,7 @@ export interface RawSnapshotEvent {
   inbox: ReadonlyArray<{
     id: number;
     mode: "steer" | "followUp";
+    text?: string;
   }>;
   agent: {
     model?: ModelRef;
@@ -279,7 +400,7 @@ export type RawAgentEvent =
     }
   | {
       type: "inbox_update";
-      items: ReadonlyArray<{ id: number; mode: "steer" | "followUp" }>;
+      items: ReadonlyArray<{ id: number; mode: "steer" | "followUp"; text?: string }>;
     }
   | {
       type: "auto_retry_start";

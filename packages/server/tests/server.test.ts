@@ -79,7 +79,46 @@ describe("@mypi/server integration test", () => {
       const gitStatus = await client.getGitStatus(created.id);
       assert.equal(typeof gitStatus.isGitRepo, "boolean");
 
-      // 7. Delete/archive session
+      // 7. File & Directory Workbench endpoints (mkdir + git init, bookmarks, file preview)
+      const createdSubDir = await client.createDirectory({
+        parentPath: tmpDataDir,
+        name: "sandbox-repo",
+        gitInit: true,
+      });
+      assert.equal(createdSubDir.isGitRepo, true);
+
+      const bookmarkRes = await client.updateBookmark({
+        path: createdSubDir.path,
+        bookmarked: true,
+      });
+      assert.ok(bookmarkRes.bookmarks.includes(createdSubDir.path));
+
+      const sampleFilePath = path.join(createdSubDir.path, "hello.ts");
+      fs.writeFileSync(sampleFilePath, "export const x = 42;\n", "utf8");
+      const preview = await client.readFilePreview(sampleFilePath);
+      assert.equal(preview.name, "hello.ts");
+      assert.equal(preview.isBinary, false);
+      assert.ok(preview.content.includes("export const x = 42;"));
+
+      // 8. Live session CWD + title update & context reset
+      const updatedSession = await client.updateSession(created.id, {
+        name: "Updated Title",
+        cwd: createdSubDir.path,
+      });
+      assert.equal(updatedSession.name, "Updated Title");
+      assert.equal(updatedSession.cwd, createdSubDir.path);
+
+      const resetRes = await client.resetSession(created.id, {
+        handoff: "Starting fresh in sandbox-repo",
+      });
+      assert.equal(resetRes.status, "reset");
+
+      // 9. OpenAI account usage endpoint
+      const openaiUsage = await client.getOpenAIUsage();
+      assert.equal(typeof openaiUsage.configured, "boolean");
+      assert.ok(Array.isArray(openaiUsage.ledger.byModel));
+
+      // 10. Delete/archive session
       const deleted = await client.deleteSession(created.id);
       assert.equal(deleted.archived, true);
     } finally {

@@ -1,8 +1,13 @@
 import type { IncomingMessage, ServerResponse } from "node:http";
 import type {
+  CompactSessionRequest,
+  CreateDirectoryRequest,
   CreateSessionRequest,
+  GitCloneRequest,
+  ResetSessionRequest,
   SendMessageRequest,
   SseFrame,
+  UpdateBookmarkRequest,
   UpdateSessionRequest,
 } from "@mypi/shared";
 import { inspectGitDirectory } from "./git-service.js";
@@ -107,11 +112,52 @@ export function createRequestHandler(options: {
         return;
       }
 
+      // GET /v1/usage/openai
+      if (req.method === "GET" && pathname === "/v1/usage/openai") {
+        const usage = await manager.getOpenAIUsage();
+        sendJson(res, 200, usage);
+        return;
+      }
+
       // GET /v1/fs/dirs
       if (req.method === "GET" && pathname === "/v1/fs/dirs") {
         const dirPath = url.searchParams.get("path") || undefined;
-        const listing = manager.listDirectories(dirPath);
+        const hiddenParam = url.searchParams.get("includeHidden");
+        const includeHidden = hiddenParam === "1" || hiddenParam === "true";
+        const listing = manager.listDirectories(dirPath, { includeHidden });
         sendJson(res, 200, listing);
+        return;
+      }
+
+      // POST /v1/fs/mkdir
+      if (req.method === "POST" && pathname === "/v1/fs/mkdir") {
+        const body = await readJsonBody<CreateDirectoryRequest>(req);
+        const created = await manager.createDirectory(body);
+        sendJson(res, 201, created);
+        return;
+      }
+
+      // POST /v1/fs/git-clone
+      if (req.method === "POST" && pathname === "/v1/fs/git-clone") {
+        const body = await readJsonBody<GitCloneRequest>(req);
+        const cloned = await manager.gitCloneDirectory(body);
+        sendJson(res, 201, cloned);
+        return;
+      }
+
+      // POST /v1/fs/bookmarks
+      if (req.method === "POST" && pathname === "/v1/fs/bookmarks") {
+        const body = await readJsonBody<UpdateBookmarkRequest>(req);
+        const updated = manager.updateBookmark(body);
+        sendJson(res, 200, updated);
+        return;
+      }
+
+      // GET /v1/fs/file
+      if (req.method === "GET" && pathname === "/v1/fs/file") {
+        const filePath = url.searchParams.get("path") || "";
+        const preview = manager.readFilePreview(filePath);
+        sendJson(res, 200, preview);
         return;
       }
 
@@ -171,6 +217,31 @@ export function createRequestHandler(options: {
           return;
         }
 
+        // POST /v1/sessions/:id/compact
+        if (req.method === "POST" && subRoute === "compact") {
+          const body = await readJsonBody<CompactSessionRequest>(req);
+          const result = await manager.compactSession(sessionId, body);
+          sendJson(res, 200, result);
+          return;
+        }
+
+        // POST /v1/sessions/:id/reset
+        if (req.method === "POST" && subRoute === "reset") {
+          const body = await readJsonBody<ResetSessionRequest>(req);
+          const result = await manager.resetSession(sessionId, body);
+          sendJson(res, 200, result);
+          return;
+        }
+
+        // POST /v1/sessions/:id/inbox/:submissionId/abort
+        const inboxAbortMatch = subRoute.match(/^inbox\/(\d+)\/abort$/);
+        if (req.method === "POST" && inboxAbortMatch) {
+          const submissionId = Number(inboxAbortMatch[1]);
+          const result = await manager.abortSubmission(sessionId, submissionId);
+          sendJson(res, 200, result);
+          return;
+        }
+
         // POST /v1/sessions/:id/abort
         if (req.method === "POST" && subRoute === "abort") {
           const result = await manager.abortSession(sessionId);
@@ -218,7 +289,7 @@ export function createRequestHandler(options: {
       sendError(res, 404, "not_found", `Route not found: ${pathname}`);
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
-      const status = message.includes("not found") ? 404 : 500;
+      const status = message.toLowerCase().includes("not found") ? 404 : 500;
       sendError(
         res,
         status,

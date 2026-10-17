@@ -122,4 +122,61 @@ describe("@mypi/shared reducer and SSE parser", () => {
       name: "MacBook",
     });
   });
+
+  it("calculates active contextTokens after compaction/reset and parses nested UsageState", () => {
+    const state = applySnapshot({
+      type: "snapshot",
+      entries: [
+        {
+          id: 1,
+          conversationId: 1,
+          kind: "pi.user",
+          model: [{ role: "user", content: "A".repeat(400) }], // ~115 tokens before compaction
+        },
+        {
+          id: 2,
+          conversationId: 1,
+          kind: "pi.compaction",
+          model: [{ role: "user", content: "Summary1234567890" }], // ~5 tokens
+        },
+        {
+          id: 3,
+          conversationId: 1,
+          kind: "pi.user",
+          model: [{ role: "user", content: "B".repeat(70) }], // 20 tokens
+        },
+      ],
+      tools: [],
+      compactions: [],
+      inbox: [{ id: 7, mode: "steer", text: "Check tests" }],
+      agent: {
+        model: { provider: "openai", modelId: "gpt-5" },
+        thinkingLevel: "high",
+        cwd: "/tmp",
+      },
+      usage: {
+        models: {
+          "openai/gpt-5": {
+            input: 1200,
+            output: 300,
+            cacheRead: 400,
+            totalTokens: 1900,
+            cost: { total: 0.0125 },
+          },
+        },
+      },
+    });
+
+    assert.equal(state.usage.inputTokens, 1200);
+    assert.equal(state.usage.outputTokens, 300);
+    assert.equal(state.usage.cacheReadTokens, 400);
+    assert.equal(state.usage.totalTokens, 1900);
+    assert.equal(state.usage.totalCost, 0.0125);
+    // Active context should only count entries from the compaction entry (id 2) onwards, not id 1
+    assert.ok(
+      state.usage.contextTokens > 20 && state.usage.contextTokens < 40,
+      `Expected contextTokens between 20 and 40, got ${state.usage.contextTokens}`,
+    );
+    assert.equal(state.inbox[0]?.text, "Check tests");
+  });
 });

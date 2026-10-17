@@ -1,12 +1,25 @@
 import type {
+  AbortSubmissionResponse,
+  CompactSessionRequest,
+  CompactSessionResponse,
+  CreateDirectoryRequest,
+  CreateDirectoryResponse,
   CreateSessionRequest,
   DeviceInfo,
   DirectoryListing,
+  FilePreviewResponse,
+  GitCloneRequest,
+  GitCloneResponse,
   GitStatusResponse,
+  OpenAIAccountUsageResponse,
+  ResetSessionRequest,
+  ResetSessionResponse,
   SendMessageRequest,
   SendMessageResponse,
   SessionSummary,
   SseFrame,
+  UpdateBookmarkRequest,
+  UpdateBookmarkResponse,
   UpdateSessionRequest,
 } from "./protocol";
 
@@ -153,9 +166,46 @@ export class MyPiClient {
     return this.request<DeviceInfo>("/v1/device");
   }
 
-  async listDirs(path?: string): Promise<DirectoryListing> {
-    const query = path ? `?path=${encodeURIComponent(path)}` : "";
-    return this.request<DirectoryListing>(`/v1/fs/dirs${query}`);
+  async listDirs(
+    path?: string,
+    options?: { includeHidden?: boolean },
+  ): Promise<DirectoryListing> {
+    const params = new URLSearchParams();
+    if (path) params.set("path", path);
+    if (options?.includeHidden) params.set("includeHidden", "true");
+    const qs = params.toString();
+    return this.request<DirectoryListing>(`/v1/fs/dirs${qs ? `?${qs}` : ""}`);
+  }
+
+  async createDirectory(
+    req: CreateDirectoryRequest,
+  ): Promise<CreateDirectoryResponse> {
+    return this.request<CreateDirectoryResponse>("/v1/fs/mkdir", {
+      method: "POST",
+      body: JSON.stringify(req),
+    });
+  }
+
+  async gitClone(req: GitCloneRequest): Promise<GitCloneResponse> {
+    return this.request<GitCloneResponse>("/v1/fs/git-clone", {
+      method: "POST",
+      body: JSON.stringify(req),
+    });
+  }
+
+  async updateBookmark(
+    req: UpdateBookmarkRequest,
+  ): Promise<UpdateBookmarkResponse> {
+    return this.request<UpdateBookmarkResponse>("/v1/fs/bookmarks", {
+      method: "POST",
+      body: JSON.stringify(req),
+    });
+  }
+
+  async readFilePreview(path: string): Promise<FilePreviewResponse> {
+    return this.request<FilePreviewResponse>(
+      `/v1/fs/file?path=${encodeURIComponent(path)}`,
+    );
   }
 
   async listSessions(): Promise<SessionSummary[]> {
@@ -218,10 +268,55 @@ export class MyPiClient {
     );
   }
 
+  async compactSession(
+    sessionId: string,
+    req?: CompactSessionRequest,
+  ): Promise<CompactSessionResponse> {
+    return this.request<CompactSessionResponse>(
+      `/v1/sessions/${encodeURIComponent(sessionId)}/compact`,
+      {
+        method: "POST",
+        body: JSON.stringify(req ?? {}),
+      },
+    );
+  }
+
+  async resetSession(
+    sessionId: string,
+    req?: ResetSessionRequest,
+  ): Promise<ResetSessionResponse> {
+    return this.request<ResetSessionResponse>(
+      `/v1/sessions/${encodeURIComponent(sessionId)}/reset`,
+      {
+        method: "POST",
+        body: JSON.stringify(req ?? {}),
+      },
+    );
+  }
+
+  async abortSubmission(
+    sessionId: string,
+    submissionId: number,
+  ): Promise<AbortSubmissionResponse> {
+    return this.request<AbortSubmissionResponse>(
+      `/v1/sessions/${encodeURIComponent(sessionId)}/inbox/${encodeURIComponent(
+        String(submissionId),
+      )}/abort`,
+      {
+        method: "POST",
+        body: JSON.stringify({}),
+      },
+    );
+  }
+
   async getGitStatus(sessionId: string): Promise<GitStatusResponse> {
     return this.request<GitStatusResponse>(
       `/v1/sessions/${encodeURIComponent(sessionId)}/git`,
     );
+  }
+
+  async getOpenAIUsage(): Promise<OpenAIAccountUsageResponse> {
+    return this.request<OpenAIAccountUsageResponse>("/v1/usage/openai");
   }
 
   /**

@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from "react";
+import React, { useState } from "react";
 import {
   ActivityIndicator,
   Platform,
@@ -11,12 +11,12 @@ import {
 } from "react-native";
 import type {
   DeviceInfo,
-  DirectoryListing,
   ModelRef,
   MyPiClient,
   SessionSummary,
   ThinkingLevel,
 } from "@mypi/shared";
+import { FileBrowserPanel } from "../components/FileBrowserPanel";
 
 const MONO_FONT = Platform.select({
   ios: "Menlo",
@@ -47,8 +47,6 @@ export function NewSessionScreen({
   const [currentDir, setCurrentDir] = useState<string>(
     device.startDirs[0] || "",
   );
-  const [listing, setListing] = useState<DirectoryListing | null>(null);
-  const [loadingDirs, setLoadingDirs] = useState(false);
   const [sessionName, setSessionName] = useState("");
   const [selectedModel, setSelectedModel] = useState<ModelRef>(
     device.defaultModel,
@@ -58,24 +56,6 @@ export function NewSessionScreen({
   );
   const [creating, setCreating] = useState(false);
   const [error, setError] = useState<string | null>(null);
-
-  const loadDirectory = async (targetPath?: string) => {
-    setLoadingDirs(true);
-    setError(null);
-    try {
-      const res = await client.listDirs(targetPath);
-      setListing(res);
-      setCurrentDir(res.path);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
-    } finally {
-      setLoadingDirs(false);
-    }
-  };
-
-  useEffect(() => {
-    void loadDirectory(currentDir || undefined);
-  }, []);
 
   const handleCreate = async () => {
     if (!currentDir.trim()) {
@@ -109,58 +89,16 @@ export function NewSessionScreen({
       </View>
 
       <View style={styles.card}>
-        <Text style={styles.sectionTitle}>1. SELECT PROJECT DIRECTORY (REMOTE)</Text>
-        <View style={styles.currentPathBox}>
-          <Text style={styles.currentPathLabel}>CWD:</Text>
-          <Text style={styles.currentPathText} selectable>
-            {currentDir}
-          </Text>
-        </View>
-
-        <View style={styles.dirNavRow}>
-          {listing?.parent && (
-            <Pressable
-              style={styles.upBtn}
-              onPress={() => loadDirectory(listing.parent!)}
-            >
-              <Text style={styles.upBtnText}>⬆ Parent Directory</Text>
-            </Pressable>
-          )}
-          {device.startDirs.map((dir) => (
-            <Pressable
-              key={dir}
-              style={styles.quickDirBtn}
-              onPress={() => loadDirectory(dir)}
-            >
-              <Text style={styles.quickDirText}>{dir}</Text>
-            </Pressable>
-          ))}
-        </View>
-
-        {loadingDirs ? (
-          <ActivityIndicator color="#60a5fa" style={{ marginVertical: 12 }} />
-        ) : (
-          <View style={styles.dirList}>
-            {listing?.dirs.slice(0, 40).map((d) => (
-              <Pressable
-                key={d.path}
-                style={styles.dirItem}
-                onPress={() => loadDirectory(d.path)}
-              >
-                <Text style={styles.dirIcon}>{d.isGitRepo ? "📦" : "📁"}</Text>
-                <Text style={styles.dirName} numberOfLines={1}>
-                  {d.name}
-                </Text>
-                {d.isGitRepo && <Text style={styles.gitBadge}>GIT</Text>}
-              </Pressable>
-            ))}
-            {listing?.dirs.length === 0 && (
-              <Text style={styles.emptyDirText}>
-                No subdirectories. Tap "Start Durable Session" below to use this folder.
-              </Text>
-            )}
-          </View>
-        )}
+        <Text style={styles.sectionTitle}>
+          1. PROJECT DIRECTORY WORKBENCH (REMOTE)
+        </Text>
+        <FileBrowserPanel
+          client={client}
+          initialPath={currentDir || undefined}
+          startDirs={device.startDirs}
+          showFiles={true}
+          onSelectDirectory={(dirPath) => setCurrentDir(dirPath)}
+        />
       </View>
 
       <View style={styles.card}>
@@ -170,7 +108,7 @@ export function NewSessionScreen({
           showsHorizontalScrollIndicator={false}
           contentContainerStyle={styles.pillsRow}
         >
-          {device.models.slice(0, 15).map((m) => {
+          {device.models.slice(0, 20).map((m) => {
             const key = `${m.provider}/${m.modelId}`;
             const active =
               selectedModel.provider === m.provider &&
@@ -295,97 +233,6 @@ const styles = StyleSheet.create({
     fontSize: 11,
     fontWeight: "700",
     letterSpacing: 0.7,
-  },
-  currentPathBox: {
-    flexDirection: "row",
-    alignItems: "center",
-    gap: 8,
-    backgroundColor: "#0b0e14",
-    padding: 10,
-    borderRadius: 8,
-    borderWidth: 1,
-    borderColor: "#2e3646",
-  },
-  currentPathLabel: {
-    color: "#60a5fa",
-    fontFamily: MONO_FONT,
-    fontSize: 12,
-    fontWeight: "700",
-  },
-  currentPathText: {
-    flex: 1,
-    color: "#f3f4f6",
-    fontFamily: MONO_FONT,
-    fontSize: 12,
-  },
-  dirNavRow: {
-    flexDirection: "row",
-    flexWrap: "wrap",
-    gap: 8,
-  },
-  upBtn: {
-    backgroundColor: "#1e293b",
-    paddingHorizontal: 10,
-    paddingVertical: 6,
-    borderRadius: 6,
-  },
-  upBtnText: {
-    color: "#93c5fd",
-    fontSize: 12,
-    fontWeight: "600",
-  },
-  quickDirBtn: {
-    backgroundColor: "#111827",
-    paddingHorizontal: 10,
-    paddingVertical: 6,
-    borderRadius: 6,
-    borderWidth: 1,
-    borderColor: "#374151",
-  },
-  quickDirText: {
-    color: "#9ca3af",
-    fontFamily: MONO_FONT,
-    fontSize: 11,
-  },
-  dirList: {
-    maxHeight: 240,
-    gap: 6,
-  },
-  dirItem: {
-    flexDirection: "row",
-    alignItems: "center",
-    gap: 8,
-    backgroundColor: "#0d1017",
-    paddingHorizontal: 10,
-    paddingVertical: 9,
-    borderRadius: 7,
-    borderWidth: 1,
-    borderColor: "#1f2430",
-  },
-  dirIcon: {
-    fontSize: 14,
-  },
-  dirName: {
-    flex: 1,
-    color: "#e5e7eb",
-    fontFamily: MONO_FONT,
-    fontSize: 13,
-  },
-  gitBadge: {
-    backgroundColor: "#065f46",
-    color: "#6ee7b7",
-    fontFamily: MONO_FONT,
-    fontSize: 10,
-    fontWeight: "700",
-    paddingHorizontal: 6,
-    paddingVertical: 2,
-    borderRadius: 4,
-  },
-  emptyDirText: {
-    color: "#9ca3af",
-    fontSize: 12,
-    fontStyle: "italic",
-    paddingVertical: 8,
   },
   pillsRow: {
     gap: 8,

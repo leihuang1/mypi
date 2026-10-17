@@ -23,8 +23,11 @@ export function createInitialSessionState(): SessionLiveState {
     usage: {
       inputTokens: 0,
       outputTokens: 0,
+      cacheReadTokens: 0,
+      cacheWriteTokens: 0,
       totalTokens: 0,
       totalCost: 0,
+      contextTokens: 0,
     },
   };
 }
@@ -111,31 +114,192 @@ function parseAssistantMessage(
   };
 }
 
-function parseUsage(rawUsage: unknown): UsageSummary {
+function addSingleUsageBucket(
+  target: UsageSummary,
+  bucket: Record<string, unknown>,
+): void {
+  const input = typeof bucket.input === "number" ? bucket.input : 0;
+  const output = typeof bucket.output === "number" ? bucket.output : 0;
+  const cacheRead = typeof bucket.cacheRead === "number" ? bucket.cacheRead : 0;
+  const cacheWrite = typeof bucket.cacheWrite === "number" ? bucket.cacheWrite : 0;
+  const total =
+    typeof bucket.totalTokens === "number" && bucket.totalTokens > 0
+      ? bucket.totalTokens
+      : input + output + cacheRead + cacheWrite;
+
+  target.inputTokens += input;
+  target.outputTokens += output;
+  target.cacheReadTokens += cacheRead;
+  target.cacheWriteTokens += cacheWrite;
+  target.totalTokens += total;
+
+  if (bucket.cost && typeof bucket.cost === "object") {
+    const c = bucket.cost as Record<string, unknown>;
+    if (typeof c.total === "number") {
+      target.totalCost += c.total;
+    }
+  }
+}
+
+function estimateRawMessageTokens(msg: Record<string, unknown>): number {
+  const CHARS_PER_TOKEN = 3.5;
+  const content = msg.content;
+  if (typeof content === "string") {
+    return Math.ceil(content.length / CHARS_PER_TOKEN);
+  }
+  if (Array.isArray(content)) {
+    let chars = 0;
+    for (const block of content) {
+      if (!block || typeof block !== "object") continue;
+      const b = block as Record<string, unknown>;
+      if (b.type === "text" && typeof b.text === "string") {
+        chars += b.text.length;
+      } else if (b.type === "thinking" && typeof b.thinking === "string") {
+        chars += b.thinking.length;
+      } else if (b.type === "toolCall") {
+        chars +=
+          (typeof b.name === "string" ? b.name.length : 4) +
+          JSON.stringify(b.arguments ?? {}).length;
+      } else {
+        chars += 1200;
+      }
+    }
+    return Math.ceil(chars / CHARS_PER_TOKEN);
+  }
+  return 0;
+}
+
+export function estimateActiveContextTokens(
+  entries: readonly RawEntryRecord[],
+  inFlightAssistant: AssistantTranscriptItem | null,
+): number {
+  // Determine active context range after newest reset or compaction head marker
+  let headMarkerIndex = -1;
+  let headTargetId: number | undefined;
+  for (let i = entries.length - 1; i >= 0; i--) {
+    const e = entries[i];
+    if (e.kind === "pi.reset") {
+      headMarkerIndex = i;
+      headTargetId = e.id;
+      break;
+    }
+    if (e.kind === "pi.compaction" || typeof e.head === "number") {
+      headMarkerIndex = i;
+      headTargetId = typeof e.head === "number" ? e.head : e.id;
+      break;
+    }
+  }
+
+  const activeEntries: RawEntryRecord[] = [];
+  if (headMarkerIndex >= 0) {
+    activeEntries.push(entries[headMarkerIndex]);
+    for (let i = 0; i < entries.length; i++) {
+      if (i === headMarkerIndex) continue;
+      const e = entries[i];
+      if (headTargetId !== undefined && e.id >= headTargetId && i > headMarkerIndex) {
+        activeEntries.push(e);
+      } else if (
+        entries[headMarkerIndex].kind === "pi.compaction" &&
+        headTargetId !== undefined &&
+        e.id >= headTargetId
+      ) {
+        activeEntries.push(e);
+      }
+    }
+  } else {
+    activeEntries.push(...entries);
+  }
+
+  const headMarkerEntryId =
+    headMarkerIndex >= 0 ? entries[headMarkerIndex].id : -1;
+  let measuredTokens = 0;
+  let measuredEntryIdx = -1;
+
+  for (let i = activeEntries.length - 1; i >= 0; i--) {
+    const e = activeEntries[i];
+    if (e.id <= headMarkerEntryId) continue;
+    const firstMsg =
+      Array.isArray(e.model) && e.model.length > 0 ? e.model[0] : undefined;
+    if (
+      e.kind === "pi.assistant" &&
+      firstMsg &&
+      firstMsg.stopReason !== "aborted" &&
+      firstMsg.stopReason !== "error" &&
+      firstMsg.usage &&
+      typeof firstMsg.usage === "object"
+    ) {
+      const u = firstMsg.usage as Record<string, unknown>;
+      const input = typeof u.input === "number" ? u.input : 0;
+      const output = typeof u.output === "number" ? u.output : 0;
+      const cacheRead = typeof u.cacheRead === "number" ? u.cacheRead : 0;
+      const cacheWrite = typeof u.cacheWrite === "number" ? u.cacheWrite : 0;
+      const total =
+        typeof u.totalTokens === "number" && u.totalTokens > 0
+          ? u.totalTokens
+          : input + output + cacheRead + cacheWrite;
+      if (total > 0) {
+        measuredTokens = total;
+        measuredEntryIdx = i;
+        break;
+      }
+    }
+  }
+
+  let trailingTokens = 0;
+  const startIdx = measuredEntryIdx >= 0 ? measuredEntryIdx + 1 : 0;
+  for (let i = startIdx; i < activeEntries.length; i++) {
+    const msgs = Array.isArray(activeEntries[i].model) ? activeEntries[i].model! : [];
+    for (const m of msgs) {
+      if (m && typeof m === "object") {
+        trailingTokens += estimateRawMessageTokens(m as Record<string, unknown>);
+      }
+    }
+  }
+
+  if (inFlightAssistant) {
+    const inFlightChars =
+      (inFlightAssistant.thinking?.length || 0) +
+      (inFlightAssistant.text?.length || 0);
+    trailingTokens += Math.ceil(inFlightChars / 3.5);
+  }
+
+  return measuredTokens + trailingTokens;
+}
+
+function parseUsage(rawUsage: unknown, contextTokens = 0): UsageSummary {
   const summary: UsageSummary = {
     inputTokens: 0,
     outputTokens: 0,
+    cacheReadTokens: 0,
+    cacheWriteTokens: 0,
     totalTokens: 0,
     totalCost: 0,
+    contextTokens,
   };
   if (!rawUsage || typeof rawUsage !== "object") return summary;
   const u = rawUsage as Record<string, unknown>;
+
+  if (u.models && typeof u.models === "object") {
+    for (const bucket of Object.values(u.models as Record<string, unknown>)) {
+      if (bucket && typeof bucket === "object") {
+        addSingleUsageBucket(summary, bucket as Record<string, unknown>);
+      }
+    }
+    if (u.tools && typeof u.tools === "object") {
+      for (const bucket of Object.values(u.tools as Record<string, unknown>)) {
+        if (bucket && typeof bucket === "object") {
+          addSingleUsageBucket(summary, bucket as Record<string, unknown>);
+        }
+      }
+    }
+    return summary;
+  }
+
   const totals =
     u.totals && typeof u.totals === "object"
       ? (u.totals as Record<string, unknown>)
       : u;
-
-  if (typeof totals.input === "number") summary.inputTokens = totals.input;
-  if (typeof totals.output === "number") summary.outputTokens = totals.output;
-  if (typeof totals.totalTokens === "number") {
-    summary.totalTokens = totals.totalTokens;
-  } else {
-    summary.totalTokens = summary.inputTokens + summary.outputTokens;
-  }
-  if (totals.cost && typeof totals.cost === "object") {
-    const c = totals.cost as Record<string, unknown>;
-    if (typeof c.total === "number") summary.totalCost = c.total;
-  }
+  addSingleUsageBucket(summary, totals);
   return summary;
 }
 
@@ -182,7 +346,12 @@ export function buildTranscriptItems(
         toolCallIndex.set(tc.callId, tc);
       }
       items.push(assistantItem);
-    } else if (entry.kind === "pi.tool_result" && firstMsg) {
+    } else if (
+      (entry.kind === "pi.tool_result" ||
+        entry.kind === "pi.tool-result" ||
+        firstMsg?.role === "toolResult") &&
+      firstMsg
+    ) {
       const callId =
         typeof firstMsg.toolCallId === "string" ? firstMsg.toolCallId : "";
       const isError = Boolean(firstMsg.isError);
@@ -297,6 +466,8 @@ export function applySnapshot(snapshot: RawSnapshotEvent): SessionLiveState {
       }
     : undefined;
 
+  const contextTokens = estimateActiveContextTokens(entries, inFlightAssistant);
+
   return {
     entries,
     items: buildTranscriptItems(entries, inFlightAssistant, liveTools),
@@ -309,7 +480,7 @@ export function applySnapshot(snapshot: RawSnapshotEvent): SessionLiveState {
     model: snapshot.agent?.model,
     thinkingLevel: snapshot.agent?.thinkingLevel,
     cwd: snapshot.agent?.cwd,
-    usage: parseUsage(snapshot.usage),
+    usage: parseUsage(snapshot.usage, contextTokens),
   };
 }
 
@@ -433,7 +604,21 @@ export function applyAgentEvent(
     }
 
     case "message_end": {
-      if (!entries.some((e) => e.id === event.entry.id)) {
+      if (
+        typeof event.entry.head === "number" ||
+        event.entry.kind === "pi.compaction" ||
+        event.entry.kind === "pi.reset"
+      ) {
+        const target =
+          typeof event.entry.head === "number"
+            ? event.entry.head
+            : event.entry.id;
+        let kept = entries.findIndex(
+          (candidate) => candidate.head === undefined && candidate.id >= target,
+        );
+        if (kept < 0) kept = entries.length;
+        entries = [event.entry, ...entries.slice(kept)];
+      } else if (!entries.some((e) => e.id === event.entry.id)) {
         entries = [...entries, event.entry];
       }
       if (event.entry.kind === "pi.assistant") {
@@ -443,7 +628,21 @@ export function applyAgentEvent(
     }
 
     case "entry_appended": {
-      if (!entries.some((e) => e.id === event.entry.id)) {
+      if (
+        typeof event.entry.head === "number" ||
+        event.entry.kind === "pi.compaction" ||
+        event.entry.kind === "pi.reset"
+      ) {
+        const target =
+          typeof event.entry.head === "number"
+            ? event.entry.head
+            : event.entry.id;
+        let kept = entries.findIndex(
+          (candidate) => candidate.head === undefined && candidate.id >= target,
+        );
+        if (kept < 0) kept = entries.length;
+        entries = [event.entry, ...entries.slice(kept)];
+      } else if (!entries.some((e) => e.id === event.entry.id)) {
         entries = [...entries, event.entry];
       }
       break;
@@ -533,7 +732,7 @@ export function applyAgentEvent(
       break;
 
     case "usage_changed":
-      usage = parseUsage(event.usage);
+      usage = parseUsage(event.usage, estimateActiveContextTokens(entries, inFlightAssistant));
       break;
 
     case "compaction_start":
@@ -547,6 +746,11 @@ export function applyAgentEvent(
     case "task_failed":
       lastError = `${event.kind}: ${event.message}`;
       break;
+  }
+
+  const nextContextTokens = estimateActiveContextTokens(entries, inFlightAssistant);
+  if (usage.contextTokens !== nextContextTokens) {
+    usage = { ...usage, contextTokens: nextContextTokens };
   }
 
   return {

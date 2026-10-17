@@ -1,33 +1,54 @@
+import { execFile } from "node:child_process";
 import crypto from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { promisify } from "node:util";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import {
   type Conversation,
   createRegistry,
   Harness,
+  InboxDoc,
   ROOT_CONVERSATION_ID,
+  type SubmissionId,
   watchEvents,
 } from "@earendil-works/pi-durable";
 import { NodeExecutionEnv } from "@earendil-works/pi-durable/env/node";
 import { openNodeSqliteStorage } from "@earendil-works/pi-durable/storage/sqlite/node";
 import { CodingTools } from "@earendil-works/pi-durable/tools";
 import type {
+  AbortSubmissionResponse,
+  CompactSessionRequest,
+  CompactSessionResponse,
+  CreateDirectoryRequest,
+  CreateDirectoryResponse,
   CreateSessionRequest,
   DeviceInfo,
   DirectoryListing,
+  FileEntrySummary,
+  FilePreviewResponse,
+  GitCloneRequest,
+  GitCloneResponse,
   ModelRef,
+  OpenAIAccountUsageResponse,
+  QueuedSubmissionItem,
   RawAgentEvent,
   RawSnapshotEvent,
+  ResetSessionRequest,
+  ResetSessionResponse,
   SendMessageRequest,
   SendMessageResponse,
   SessionSummary,
   SseFrame,
   ThinkingLevel,
+  UpdateBookmarkRequest,
+  UpdateBookmarkResponse,
   UpdateSessionRequest,
 } from "@mypi/shared";
 import type { LoadedModelsConfig } from "./auth-loader.js";
+
+const execFileAsync = promisify(execFile);
 
 interface CatalogEntry {
   id: string;
@@ -42,12 +63,14 @@ interface CatalogEntry {
 interface CatalogData {
   deviceUid: string;
   sessions: CatalogEntry[];
+  bookmarks?: string[];
 }
 
 interface ManagedSession {
   meta: CatalogEntry;
   harness: Harness;
   root: Conversation;
+  submissionTexts: Map<number, string>;
 }
 
 const DEFAULT_SYSTEM_INSTRUCTIONS = [
@@ -85,7 +108,10 @@ export class HarnessManager {
           fs.readFileSync(this.catalogPath, "utf8"),
         ) as CatalogData;
         if (parsed && Array.isArray(parsed.sessions)) {
-          return parsed;
+          return {
+            ...parsed,
+            bookmarks: Array.isArray(parsed.bookmarks) ? parsed.bookmarks : [],
+          };
         }
       } catch {
         // Fallback to new catalog
@@ -94,6 +120,7 @@ export class HarnessManager {
     const fresh: CatalogData = {
       deviceUid: crypto.randomUUID(),
       sessions: [],
+      bookmarks: [],
     };
     this.saveCatalog(fresh);
     return fresh;
@@ -101,6 +128,82 @@ export class HarnessManager {
 
   private saveCatalog(data: CatalogData = this.catalog): void {
     fs.writeFileSync(this.catalogPath, JSON.stringify(data, null, 2), "utf8");
+  }
+
+  private expandUserPath(rawPath: string): string {
+    const trimmed = rawPath.trim();
+    if (trimmed === "~") {
+      return os.homedir();
+    }
+    if (trimmed.startsWith("~/") || trimmed.startsWith("~\\")) {
+      return path.resolve(os.homedir(), trimmed.slice(2));
+    }
+    return path.resolve(trimmed);
+  }
+
+  getBookmarks(): string[] {
+    const raw = this.catalog.bookmarks ?? [];
+    return raw.filter((dirPath) => {
+      try {
+        return fs.existsSync(dirPath) && fs.statSync(dirPath).isDirectory();
+      } catch {
+        return false;
+      }
+    });
+  }
+
+  getRecentDirs(): string[] {
+    const seen = new Set<string>();
+    const recent: string[] = [];
+    const sortedSessions = [...this.catalog.sessions].sort(
+      (a, b) => b.updatedAt - a.updatedAt,
+    );
+    for (const s of sortedSessions) {
+      if (s.cwd && !seen.has(s.cwd)) {
+        try {
+          if (fs.existsSync(s.cwd) && fs.statSync(s.cwd).isDirectory()) {
+            seen.add(s.cwd);
+            recent.push(s.cwd);
+          }
+        } catch {
+          // Ignore inaccessible dir
+        }
+      }
+      if (recent.length >= 8) break;
+    }
+    for (const startDir of this.startDirs) {
+      const resolved = this.expandUserPath(startDir);
+      if (!seen.has(resolved) && recent.length < 8) {
+        try {
+          if (fs.existsSync(resolved) && fs.statSync(resolved).isDirectory()) {
+            seen.add(resolved);
+            recent.push(resolved);
+          }
+        } catch {
+          // Ignore
+        }
+      }
+    }
+    return recent;
+  }
+
+  updateBookmark(req: UpdateBookmarkRequest): UpdateBookmarkResponse {
+    if (!req.path || typeof req.path !== "string") {
+      throw new Error("Bookmark path is required");
+    }
+    const targetPath = this.expandUserPath(req.path);
+    const current = new Set(this.catalog.bookmarks ?? []);
+    if (req.bookmarked) {
+      if (!fs.existsSync(targetPath) || !fs.statSync(targetPath).isDirectory()) {
+        throw new Error(`Directory not found: ${targetPath}`);
+      }
+      current.add(targetPath);
+    } else {
+      current.delete(targetPath);
+    }
+    this.catalog.bookmarks = Array.from(current);
+    this.saveCatalog();
+    return { bookmarks: this.getBookmarks() };
   }
 
   getDeviceInfo(): DeviceInfo {
@@ -116,13 +219,21 @@ export class HarnessManager {
       defaultModel: this.modelsConfig.defaultModel,
       defaultThinkingLevel: this.modelsConfig.defaultThinkingLevel,
       startDirs: this.startDirs,
+      recentDirs: this.getRecentDirs(),
+      bookmarks: this.getBookmarks(),
     };
   }
 
-  listDirectories(requestedPath?: string): DirectoryListing {
+  listDirectories(
+    requestedPath?: string,
+    options?: { includeHidden?: boolean },
+  ): DirectoryListing {
+    const includeHidden = Boolean(options?.includeHidden);
     const targetPath = requestedPath
-      ? path.resolve(requestedPath)
-      : this.startDirs[0] || os.homedir();
+      ? this.expandUserPath(requestedPath)
+      : this.startDirs[0]
+        ? this.expandUserPath(this.startDirs[0])
+        : os.homedir();
 
     if (!fs.existsSync(targetPath)) {
       throw new Error(`Directory not found: ${targetPath}`);
@@ -134,7 +245,10 @@ export class HarnessManager {
 
     const entries = fs.readdirSync(targetPath, { withFileTypes: true });
     const dirs = entries
-      .filter((e) => e.isDirectory() && !e.name.startsWith("."))
+      .filter(
+        (e) =>
+          e.isDirectory() && (includeHidden || !e.name.startsWith(".")),
+      )
       .map((e) => {
         const fullPath = path.join(targetPath, e.name);
         let isGitRepo = false;
@@ -147,6 +261,7 @@ export class HarnessManager {
           name: e.name,
           path: fullPath,
           isGitRepo,
+          isHidden: e.name.startsWith("."),
         };
       })
       .sort((a, b) => {
@@ -154,11 +269,144 @@ export class HarnessManager {
         return a.name.localeCompare(b.name);
       });
 
+    const files: FileEntrySummary[] = entries
+      .filter(
+        (e) => e.isFile() && (includeHidden || !e.name.startsWith(".")),
+      )
+      .map((e) => {
+        const fullPath = path.join(targetPath, e.name);
+        let size = 0;
+        let mtime = 0;
+        try {
+          const fstat = fs.statSync(fullPath);
+          size = fstat.size;
+          mtime = Math.floor(fstat.mtimeMs);
+        } catch {
+          // Ignore stat error
+        }
+        return {
+          name: e.name,
+          path: fullPath,
+          size,
+          mtime,
+          isHidden: e.name.startsWith("."),
+        };
+      })
+      .sort((a, b) => a.name.localeCompare(b.name));
+
     const parentDir = path.dirname(targetPath);
     return {
       path: targetPath,
       parent: parentDir !== targetPath ? parentDir : null,
       dirs,
+      files,
+      recentDirs: this.getRecentDirs(),
+      bookmarks: this.getBookmarks(),
+    };
+  }
+
+  async createDirectory(
+    req: CreateDirectoryRequest,
+  ): Promise<CreateDirectoryResponse> {
+    let targetPath: string;
+    if (req.path?.trim()) {
+      targetPath = this.expandUserPath(req.path);
+    } else if (req.parentPath && req.name?.trim()) {
+      const parentDir = this.expandUserPath(req.parentPath);
+      if (!fs.existsSync(parentDir) || !fs.statSync(parentDir).isDirectory()) {
+        throw new Error(`Parent directory not found: ${parentDir}`);
+      }
+      targetPath = path.resolve(parentDir, req.name.trim());
+    } else {
+      throw new Error("parentPath and directory name are required");
+    }
+
+    fs.mkdirSync(targetPath, { recursive: true });
+
+    let isGitRepo = fs.existsSync(path.join(targetPath, ".git"));
+    if (req.gitInit && !isGitRepo) {
+      await execFileAsync("git", ["init"], { cwd: targetPath });
+      isGitRepo = true;
+    }
+
+    return {
+      path: targetPath,
+      isGitRepo,
+    };
+  }
+
+  async gitCloneDirectory(req: GitCloneRequest): Promise<GitCloneResponse> {
+    if (!req.targetParentDir || !req.repoUrl?.trim()) {
+      throw new Error("targetParentDir and repoUrl are required");
+    }
+    const parentDir = this.expandUserPath(req.targetParentDir);
+    if (!fs.existsSync(parentDir) || !fs.statSync(parentDir).isDirectory()) {
+      throw new Error(`Parent directory not found: ${parentDir}`);
+    }
+    const repoUrl = req.repoUrl.trim();
+    const inferredName =
+      req.folderName?.trim() ||
+      path
+        .basename(repoUrl.replace(/\/+$/, ""))
+        .replace(/\.git$/i, "") ||
+      "repo";
+
+    const targetPath = path.resolve(parentDir, inferredName);
+    if (fs.existsSync(targetPath)) {
+      throw new Error(`Target directory already exists: ${targetPath}`);
+    }
+
+    await execFileAsync("git", ["clone", repoUrl, targetPath], {
+      cwd: parentDir,
+      timeout: 120_000,
+    });
+
+    return {
+      path: targetPath,
+      isGitRepo: fs.existsSync(path.join(targetPath, ".git")),
+    };
+  }
+
+  readFilePreview(requestedPath: string): FilePreviewResponse {
+    if (!requestedPath || !requestedPath.trim()) {
+      throw new Error("File path is required");
+    }
+    const targetPath = this.expandUserPath(requestedPath);
+    if (!fs.existsSync(targetPath)) {
+      throw new Error(`File not found: ${targetPath}`);
+    }
+    const stat = fs.statSync(targetPath);
+    if (!stat.isFile()) {
+      throw new Error(`Not a file: ${targetPath}`);
+    }
+
+    const maxBytes = 64 * 1024; // 64 KB preview limit
+    const readSize = Math.min(stat.size, maxBytes);
+    const buffer = Buffer.alloc(readSize);
+    const fd = fs.openSync(targetPath, "r");
+    try {
+      fs.readSync(fd, buffer, 0, readSize, 0);
+    } finally {
+      fs.closeSync(fd);
+    }
+
+    // Check first 4KB for null bytes to detect binary files
+    const checkLength = Math.min(readSize, 4096);
+    let isBinary = false;
+    for (let i = 0; i < checkLength; i++) {
+      if (buffer[i] === 0) {
+        isBinary = true;
+        break;
+      }
+    }
+
+    return {
+      path: targetPath,
+      name: path.basename(targetPath),
+      size: stat.size,
+      content: isBinary ? "" : buffer.toString("utf8"),
+      truncated: stat.size > maxBytes,
+      isBinary,
     };
   }
 
@@ -203,7 +451,12 @@ export class HarnessManager {
       // Resume any unfinished durable tasks from before a crash/restart
       harness.resume();
 
-      return { meta, harness, root };
+      return {
+        meta,
+        harness,
+        root,
+        submissionTexts: new Map<number, string>(),
+      };
     })();
 
     this.activeSessions.set(meta.id, promise);
@@ -264,7 +517,9 @@ export class HarnessManager {
   }
 
   async createSession(req: CreateSessionRequest): Promise<SessionSummary> {
-    const resolvedCwd = path.resolve(req.cwd || this.startDirs[0] || os.homedir());
+    const resolvedCwd = this.expandUserPath(
+      req.cwd || this.startDirs[0] || os.homedir(),
+    );
     if (!fs.existsSync(resolvedCwd)) {
       throw new Error(`Working directory does not exist: ${resolvedCwd}`);
     }
@@ -317,15 +572,23 @@ export class HarnessManager {
     if (req.thinkingLevel) {
       meta.thinkingLevel = req.thinkingLevel;
     }
+    if (req.cwd && req.cwd.trim()) {
+      const resolvedCwd = this.expandUserPath(req.cwd);
+      if (!fs.existsSync(resolvedCwd) || !fs.statSync(resolvedCwd).isDirectory()) {
+        throw new Error(`Working directory does not exist: ${resolvedCwd}`);
+      }
+      meta.cwd = resolvedCwd;
+    }
     meta.updatedAt = Date.now();
     this.saveCatalog();
 
     const managed = await this.openManagedSession(meta);
-    if (req.model || req.thinkingLevel) {
+    if (req.model || req.thinkingLevel || req.cwd) {
       await managed.root.configure(
         {
           model: req.model ?? meta.model,
           thinkingLevel: req.thinkingLevel ?? meta.thinkingLevel,
+          cwd: meta.cwd,
         },
         BACKGROUND_CONTEXT,
       );
@@ -399,11 +662,76 @@ export class HarnessManager {
       BACKGROUND_CONTEXT,
     );
 
+    managed.submissionTexts.set(submission.id, req.content);
+
     const statusRecord = await submission.status(BACKGROUND_CONTEXT);
     return {
       submissionId: submission.id,
       requestId: req.requestId,
       status: statusRecord.status,
+    };
+  }
+
+  async compactSession(
+    sessionId: string,
+    req?: CompactSessionRequest,
+  ): Promise<CompactSessionResponse> {
+    const meta = this.catalog.sessions.find((s) => s.id === sessionId);
+    if (!meta) {
+      throw new Error(`Session not found: ${sessionId}`);
+    }
+    const managed = await this.openManagedSession(meta);
+    const taskId = await managed.root.compact(
+      req?.instructions?.trim() || undefined,
+      BACKGROUND_CONTEXT,
+    );
+    meta.updatedAt = Date.now();
+    this.saveCatalog();
+    return {
+      taskId: Number(taskId),
+      status: "started",
+    };
+  }
+
+  async resetSession(
+    sessionId: string,
+    req?: ResetSessionRequest,
+  ): Promise<ResetSessionResponse> {
+    const meta = this.catalog.sessions.find((s) => s.id === sessionId);
+    if (!meta) {
+      throw new Error(`Session not found: ${sessionId}`);
+    }
+    const managed = await this.openManagedSession(meta);
+    await managed.root.reset(
+      req?.handoff?.trim() || undefined,
+      BACKGROUND_CONTEXT,
+    );
+    meta.updatedAt = Date.now();
+    this.saveCatalog();
+    return {
+      status: "reset",
+    };
+  }
+
+  async abortSubmission(
+    sessionId: string,
+    submissionId: number,
+  ): Promise<AbortSubmissionResponse> {
+    const meta = this.catalog.sessions.find((s) => s.id === sessionId);
+    if (!meta) {
+      throw new Error(`Session not found: ${sessionId}`);
+    }
+    const managed = await this.openManagedSession(meta);
+    const status = await managed.harness.abortSubmission(
+      submissionId as SubmissionId,
+      BACKGROUND_CONTEXT,
+      ROOT_CONVERSATION_ID,
+    );
+    meta.updatedAt = Date.now();
+    this.saveCatalog();
+    return {
+      submissionId,
+      status,
     };
   }
 
@@ -417,6 +745,142 @@ export class HarnessManager {
     meta.updatedAt = Date.now();
     this.saveCatalog();
     return { status: "aborted" };
+  }
+
+  private async enrichInboxItems(
+    managed: ManagedSession,
+    items: readonly QueuedSubmissionItem[],
+  ): Promise<QueuedSubmissionItem[]> {
+    if (!items || items.length === 0) return [];
+    const docItemsMap = new Map<number, string>();
+    try {
+      const inboxDoc = await managed.harness.snapshot(
+        InboxDoc,
+        ROOT_CONVERSATION_ID,
+        BACKGROUND_CONTEXT,
+      );
+      if (inboxDoc && Array.isArray(inboxDoc.items)) {
+        for (const docItem of inboxDoc.items) {
+          const itemId = Number(docItem.id);
+          if (Number.isFinite(itemId) && "content" in docItem) {
+            if (typeof docItem.content === "string") {
+              docItemsMap.set(itemId, docItem.content);
+            } else if (Array.isArray(docItem.content)) {
+              const textParts = docItem.content
+                .map((p) =>
+                  p.type === "text" && typeof p.text === "string" ? p.text : "",
+                )
+                .filter(Boolean)
+                .join("\n");
+              if (textParts) {
+                docItemsMap.set(itemId, textParts);
+              }
+            }
+          }
+        }
+      }
+    } catch {
+      // Fallback to cached submissionTexts map
+    }
+
+    return items.map((item) => ({
+      ...item,
+      text:
+        item.text ||
+        docItemsMap.get(item.id) ||
+        managed.submissionTexts.get(item.id),
+    }));
+  }
+
+  async getOpenAIUsage(): Promise<OpenAIAccountUsageResponse> {
+    const byModelMap = new Map<
+      string,
+      OpenAIAccountUsageResponse["ledger"]["byModel"][number]
+    >();
+    let totalInput = 0;
+    let totalOutput = 0;
+    let totalCacheRead = 0;
+    let totalCacheWrite = 0;
+    let totalTokens = 0;
+    let totalCost = 0;
+    let sessionCount = 0;
+
+    for (const meta of this.catalog.sessions) {
+      try {
+        const managed = await this.openManagedSession(meta);
+        const usageState = await managed.harness.usage(BACKGROUND_CONTEXT);
+        let sessionHasOpenAI = false;
+
+        for (const [modelKey, u] of Object.entries(usageState.models ?? {})) {
+          if (
+            modelKey.startsWith("openai/") ||
+            modelKey.startsWith("openai-codex/")
+          ) {
+            sessionHasOpenAI = true;
+            const input = u.input ?? 0;
+            const output = u.output ?? 0;
+            const cacheRead = u.cacheRead ?? 0;
+            const cacheWrite = u.cacheWrite ?? 0;
+            const tokens =
+              u.totalTokens ?? input + output + cacheRead + cacheWrite;
+            const cost = u.cost?.total ?? 0;
+
+            totalInput += input;
+            totalOutput += output;
+            totalCacheRead += cacheRead;
+            totalCacheWrite += cacheWrite;
+            totalTokens += tokens;
+            totalCost += cost;
+
+            const existing = byModelMap.get(modelKey) ?? {
+              modelId: modelKey,
+              inputTokens: 0,
+              outputTokens: 0,
+              totalTokens: 0,
+              totalCost: 0,
+            };
+            existing.inputTokens += input;
+            existing.outputTokens += output;
+            existing.totalTokens += tokens;
+            existing.totalCost += cost;
+            byModelMap.set(modelKey, existing);
+          }
+        }
+
+        if (sessionHasOpenAI) {
+          sessionCount += 1;
+        }
+      } catch {
+        // Ignore individual session read failures
+      }
+    }
+
+    const auth = this.modelsConfig.openaiAuth;
+    return {
+      provider: "openai",
+      configured: auth.configured,
+      authType: auth.authType,
+      subscriptionLabel: auth.subscriptionLabel,
+      tokenExpiresAt: auth.tokenExpiresAt,
+      dashboardUrl:
+        auth.authType === "oauth"
+          ? "https://chatgpt.com/settings/usage"
+          : "https://platform.openai.com/usage",
+      rateLimits: this.modelsConfig.getOpenAIRateLimits(),
+      ledger: {
+        sessionCount,
+        inputTokens: totalInput,
+        outputTokens: totalOutput,
+        cacheReadTokens: totalCacheRead,
+        cacheWriteTokens: totalCacheWrite,
+        totalTokens,
+        totalCost,
+        byModel: Array.from(byModelMap.values()).sort(
+          (a, b) => b.totalTokens - a.totalTokens,
+        ),
+      },
+      updatedAt: Date.now(),
+    };
   }
 
   async subscribeSession(
@@ -443,16 +907,38 @@ export class HarnessManager {
       BACKGROUND_CONTEXT,
     );
 
+    const rawSnapshot = stream.snapshot as unknown as RawSnapshotEvent;
+    const enrichedInbox = await this.enrichInboxItems(
+      managed,
+      rawSnapshot.inbox ?? [],
+    );
+
     onFrame({
       type: "snapshot",
       session: summary,
-      snapshot: stream.snapshot as unknown as RawSnapshotEvent,
+      snapshot: {
+        ...rawSnapshot,
+        inbox: enrichedInbox,
+      },
     });
 
     stream.start(async (events) => {
+      const rawEvents = events as unknown as RawAgentEvent[];
+      const enrichedEvents: RawAgentEvent[] = [];
+      for (const ev of rawEvents) {
+        if (ev.type === "inbox_update") {
+          const items = await this.enrichInboxItems(managed, ev.items);
+          enrichedEvents.push({
+            ...ev,
+            items,
+          });
+        } else {
+          enrichedEvents.push(ev);
+        }
+      }
       onFrame({
         type: "events",
-        events: events as unknown as readonly RawAgentEvent[],
+        events: enrichedEvents,
       });
     });
 
