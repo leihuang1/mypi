@@ -24,6 +24,8 @@
     "@react-native-async-storage/async-storage": "1.23.1",
     "expo": "~52.0.37",
     "expo-camera": "~16.0.18",
+    "expo-constants": "~17.0.8",
+    "expo-notifications": "^0.29.14",
     "expo-status-bar": "~2.0.1",
     "react": "18.3.1",
     "react-dom": "18.3.1",

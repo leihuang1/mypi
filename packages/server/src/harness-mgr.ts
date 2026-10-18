@@ -46,6 +46,7 @@ import type {
   UpdateBookmarkResponse,
   UpdateSessionRequest,
 } from "@mypi/shared";
+import { NotificationService } from "./notification-service.js";
 import type { LoadedModelsConfig } from "./auth-loader.js";
 
 const execFileAsync = promisify(execFile);
@@ -71,6 +72,7 @@ interface ManagedSession {
   harness: Harness;
   root: Conversation;
   submissionTexts: Map<number, string>;
+  stopNotifications: () => Promise<void>;
 }
 
 const DEFAULT_SYSTEM_INSTRUCTIONS = [
@@ -84,6 +86,7 @@ export class HarnessManager {
   readonly startDirs: string[];
   readonly modelsConfig: LoadedModelsConfig;
   readonly startedAt = Date.now();
+  readonly notifications: NotificationService;
   private catalogPath: string;
   private catalog: CatalogData;
   private activeSessions = new Map<string, Promise<ManagedSession>>();
@@ -103,6 +106,16 @@ export class HarnessManager {
     fs.mkdirSync(path.join(this.dataDir, "sessions"), { recursive: true });
     this.catalogPath = path.join(this.dataDir, "catalog.json");
     this.catalog = this.loadCatalog();
+    this.notifications = new NotificationService(this.dataDir, (id) => this.catalog.sessions.find((session) => session.id === id)?.name);
+  }
+
+  async resumeSessions(): Promise<void> {
+    await this.trackOp(async () => {
+      await Promise.all(this.catalog.sessions.map(async (meta) => {
+        try { await this.openManagedSession(meta); }
+        catch (err) { console.error(`[mypi-server] Could not resume ${meta.id}:`, err); }
+      }));
+    });
   }
 
   beginClose(): void {
@@ -510,6 +523,26 @@ export class HarnessManager {
         },
       });
 
+      // This observer belongs to the daemon, never to an App/SSE connection.
+      const noticeStream = await watchEvents(harness, ROOT_CONVERSATION_ID, BACKGROUND_CONTEXT);
+      const recoveredSubmissions: RawAgentEvent[] = [];
+      for (const id of this.notifications.observedInputs(meta.id)) {
+        const submission = await harness.submission(id as SubmissionId, BACKGROUND_CONTEXT);
+        if (submission) recoveredSubmissions.push({ type: "submission", record: await submission.status(BACKGROUND_CONTEXT) });
+      }
+      this.notifications.events(meta.id, [noticeStream.snapshot as unknown as RawSnapshotEvent, ...recoveredSubmissions]);
+      noticeStream.start(async (events) => {
+        this.notifications.events(meta.id, events as unknown as RawAgentEvent[]);
+      });
+      let noticeStopped = false;
+      const stopNotifications = async () => {
+        if (noticeStopped) return;
+        noticeStopped = true;
+        this.activeSubscribers.delete(stopNotifications);
+        await noticeStream.stop();
+      };
+      this.activeSubscribers.add(stopNotifications);
+
       // Resume any unfinished durable tasks from before a crash/restart
       if (!this.closing) {
         harness.resume();
@@ -520,6 +553,7 @@ export class HarnessManager {
         harness,
         root,
         submissionTexts: new Map<number, string>(),
+        stopNotifications,
       };
     })();
 
@@ -690,6 +724,8 @@ export class HarnessManager {
         this.activeSessions.delete(meta.id);
         try {
           const managed = await active;
+          this.notifications.stopSession(sessionId);
+          await managed.stopNotifications();
           await managed.root.abort(BACKGROUND_CONTEXT, { background: true });
           await managed.harness.close(BACKGROUND_CONTEXT);
         } catch {
@@ -788,6 +824,7 @@ export class HarnessManager {
         throw new Error(`Session not found: ${sessionId}`);
       }
       const managed = await this.openManagedSession(meta);
+      this.notifications.stopSession(sessionId);
       await managed.root.reset(
         req?.handoff?.trim() || undefined,
         BACKGROUND_CONTEXT,
@@ -831,6 +868,7 @@ export class HarnessManager {
         throw new Error(`Session not found: ${sessionId}`);
       }
       const managed = await this.openManagedSession(meta);
+      this.notifications.stopSession(sessionId);
       await managed.root.abort(BACKGROUND_CONTEXT, { background: true });
       meta.updatedAt = Date.now();
       this.saveCatalog();
@@ -1062,6 +1100,7 @@ export class HarnessManager {
     if (this.closePromise) return this.closePromise;
     this.closing = true;
     this.closePromise = (async () => {
+      await this.notifications.close();
       while (
         this.inFlightOps.size > 0 ||
         this.activeSubscribers.size > 0 ||

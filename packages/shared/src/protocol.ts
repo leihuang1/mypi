@@ -141,6 +141,13 @@ export interface AbortSubmissionResponse {
   status: "aborted" | "already_placed" | "settled" | "not_found";
 }
 
+export interface NotificationDeviceRequest {
+  deviceId: string;
+  serverId: string;
+  enabled: boolean;
+  pushToken?: string;
+}
+
 export interface SendMessageRequest {
   requestId: string;
   content: string;
@@ -366,6 +373,7 @@ export interface RawSnapshotEvent {
 
 export type RawAgentEvent =
   | RawSnapshotEvent
+  | { type: "submission"; record: { id: number; type: "input" | "write"; status: "queued" | "placed" | "done" | "unanswered"; reason?: string } }
   | { type: "run_start"; inputs: readonly number[] }
   | { type: "run_end"; inputs: readonly number[] }
   | { type: "turn_start" }

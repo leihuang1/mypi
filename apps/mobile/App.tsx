@@ -18,6 +18,7 @@ import {
 import { NewSessionScreen } from "./src/screens/NewSessionScreen";
 import { PairServerScreen } from "./src/screens/PairServerScreen";
 import { SessionDetailScreen } from "./src/screens/SessionDetailScreen";
+import { useNotifications } from "./src/store/use-notifications";
 import { loadSessionViews, removeSessionView } from "./src/store/session-view-store";
 import type { AppScreenName } from "./src/store/session-lifecycle";
 import {
@@ -167,6 +168,15 @@ export default function App() {
   };
 
   const handleDeleteServer = async (id: string) => {
+    const target = servers.find((item) => item.id === id);
+    if (target) {
+      try { await notifications.unregister(target); }
+      catch (err) {
+        setError(`请先关闭该服务器的通知：${err instanceof Error ? err.message : String(err)}`);
+        navigateToScreen("sessions");
+        return;
+      }
+    }
     const next = await removeServerProfile(id);
     const nextActiveId = next[0]?.id ?? null;
     if (nextActiveId !== activeServerIdRef.current) {
@@ -208,6 +218,30 @@ export default function App() {
     setActiveSession((prev) => prev?.id === updated.id ? updated : prev);
     setSessions((prev) => prev.map((s) => s.id === updated.id ? updated : s));
   };
+
+  const handleNotificationOpen = async (serverId: string, sessionId: string) => {
+    const target = servers.find((item) => item.id === serverId);
+    if (!target) return;
+    const epoch = ++navEpochRef.current;
+    const targetClient = new MyPiClient({ baseUrl: target.url, token: target.token });
+    const [summary, dev] = await Promise.all([targetClient.getSession(sessionId), targetClient.getDevice()]);
+    if (epoch !== navEpochRef.current) return;
+    await setActiveServerId(serverId);
+    if (epoch !== navEpochRef.current) return;
+    resetServerScopedState();
+    setActiveId(serverId);
+    activeServerIdRef.current = serverId;
+    setDevice(dev);
+    setActiveSession(summary);
+    navigateToScreen("session-detail");
+  };
+
+  const notifications = useNotifications({
+    servers,
+    server: activeServer,
+    sessionId: screen === "session-detail" ? activeSession?.id : undefined,
+    onOpen: handleNotificationOpen,
+  });
 
   return (
     <SafeAreaView style={styles.safeArea}>
@@ -274,6 +308,17 @@ export default function App() {
               </Pressable>
             </View>
           </View>
+
+          <View style={styles.notificationRow}>
+            <View style={{ flex: 1 }}>
+              <Text style={styles.notificationTitle}>后台通知</Text>
+              <Text style={styles.notificationHint}>仅运行结束与执行异常 · 不含代码和完整输出</Text>
+            </View>
+            <Pressable onPress={notifications.toggle} disabled={notifications.busy} style={styles.serverBtn} accessibilityRole="switch" accessibilityState={{ checked: notifications.enabled, disabled: notifications.busy }}>
+              <Text style={styles.serverBtnText}>{notifications.busy ? "同步中…" : notifications.enabled ? "已开启" : "开启"}</Text>
+            </Pressable>
+          </View>
+          {notifications.error && <Text style={styles.notificationError}>{notifications.error}</Text>}
 
           {error && (
             <View style={styles.errorCard}>
@@ -377,6 +422,10 @@ export default function App() {
 }
 
 const styles = StyleSheet.create({
+  notificationRow: { flexDirection: "row", alignItems: "center", paddingHorizontal: 16, paddingVertical: 12, gap: 12, borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: "#262d3d" },
+  notificationTitle: { color: "#cbd5e1", fontSize: 12, marginBottom: 4 },
+  notificationHint: { color: "#94a3b8", fontSize: 10 },
+  notificationError: { color: "#fbbf24", fontSize: 12, paddingHorizontal: 16, paddingTop: 10 },
   safeArea: {
     flex: 1,
     backgroundColor: "#0b0e14",

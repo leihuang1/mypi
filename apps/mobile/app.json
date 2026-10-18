@@ -24,6 +24,7 @@
       ]
     },
     "plugins": [
+      ["expo-notifications", { "defaultChannel": "runs", "color": "#60a5fa" }],
       [
         "expo-camera",
         {

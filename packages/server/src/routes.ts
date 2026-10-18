@@ -4,6 +4,7 @@ import type {
   CreateDirectoryRequest,
   CreateSessionRequest,
   GitCloneRequest,
+  NotificationDeviceRequest,
   ResetSessionRequest,
   SendMessageRequest,
   SseFrame,
@@ -43,7 +44,10 @@ function sendError(
 
 async function readJsonBody<T>(req: IncomingMessage): Promise<T> {
   const chunks: Buffer[] = [];
+  let size = 0;
   for await (const chunk of req) {
+    size += Buffer.byteLength(chunk);
+    if (size > 1024 * 1024) throw new Error("Request body too large");
     chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
   }
   const raw = Buffer.concat(chunks).toString("utf8").trim();
@@ -122,6 +126,22 @@ export function createRequestHandler(options: {
         sendError(res, 401, "unauthorized", "Invalid or missing bearer token");
         return;
       }
+      if (req.method === "POST" && pathname === "/v1/notifications/devices") {
+        try {
+          manager.notifications.register(await readJsonBody<NotificationDeviceRequest>(req));
+          sendJson(res, 200, { ok: true });
+        } catch {
+          sendError(res, 400, "invalid", "Invalid notification registration or unavailable storage");
+        }
+        return;
+      }
+      if (req.method === "POST" && pathname === "/v1/notifications/presence") {
+        const body = await readJsonBody<{ deviceId: string; sessionId: string | null }>(req);
+        manager.notifications.presence(body.deviceId, body.sessionId);
+        sendJson(res, 200, { ok: true });
+        return;
+      }
+
       // GET /v1/device
       if (req.method === "GET" && pathname === "/v1/device") {
         sendJson(res, 200, manager.getDeviceInfo());

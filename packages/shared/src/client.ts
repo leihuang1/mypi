@@ -12,6 +12,7 @@ import type {
   GitCloneResponse,
   GitStatusResponse,
   OpenAIAccountUsageResponse,
+  NotificationDeviceRequest,
   ResetSessionRequest,
   ResetSessionResponse,
   SendMessageRequest,
@@ -146,6 +147,24 @@ export class MyPiClient {
   constructor(options: MyPiClientOptions) {
     this.baseUrl = normalizeBaseUrl(options.baseUrl);
     this.token = options.token.trim();
+  }
+
+  registerNotifications(request: NotificationDeviceRequest): Promise<{ ok: boolean }> {
+    return this.postNotificationUpdate("devices", request);
+  }
+
+  updateNotificationPresence(deviceId: string, sessionId: string | null): Promise<{ ok: boolean }> {
+    return this.postNotificationUpdate("presence", { deviceId, sessionId });
+  }
+
+  private async postNotificationUpdate(route: string, body: unknown): Promise<{ ok: boolean }> {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 10_000);
+    try {
+      return await this.request(`/v1/notifications/${route}`, { method: "POST", body: JSON.stringify(body), signal: controller.signal });
+    } finally {
+      clearTimeout(timer);
+    }
   }
 
   private headers(extra?: Record<string, string>): Record<string, string> {
