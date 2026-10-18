@@ -21,6 +21,8 @@ it("shows net HEAD text changes once, excludes binary/net-zero, and includes lar
     write("binary.bin", Buffer.from([0, 1, 2]));
     git("add", ".");
     git("commit", "-m", "base");
+    git("config", "diff.noprefix", "true");
+    git("config", "color.ui", "always");
     write("mixed.txt", "staged\n");
     write("cancelled.txt", "staged\n");
     git("add", ".");

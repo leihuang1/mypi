@@ -10,6 +10,7 @@ async function runGit(cwd: string, args: string[], noIndex = false): Promise<str
   try {
     const { stdout } = await execFileAsync("git", ["-c", "core.quotePath=false", ...args], {
       cwd,
+      // shortcut: cap each diff at 4 MiB; add per-file fetching before supporting larger workspaces.
       maxBuffer: 4 * 1024 * 1024,
       timeout: 10_000,
       env: { ...process.env, GIT_OPTIONAL_LOCKS: "0", GIT_LITERAL_PATHSPECS: "1" },
@@ -111,7 +112,7 @@ export async function inspectGitDirectory(cwd: string): Promise<GitStatusRespons
     // An unborn repository compares both staged and unstaged files to an empty tree.
     base = (await runGit(repoRoot, ["hash-object", "-t", "tree", "/dev/null"])).trim();
   }
-  const diffArgs = ["diff", "--no-ext-diff", "--no-textconv", "--no-renames", "--ignore-submodules=all", base];
+  const diffArgs = ["diff", "--no-color", "--src-prefix=a/", "--dst-prefix=b/", "--no-ext-diff", "--no-textconv", "--no-renames", "--ignore-submodules=all", base];
   const [statsOut, patch, untrackedOut, statusOut] = await Promise.all([
     runGit(repoRoot, [...diffArgs, "--numstat", "-z", "--"]),
     runGit(repoRoot, [...diffArgs, "--unified=3", "--"]),
@@ -145,7 +146,7 @@ export async function inspectGitDirectory(cwd: string): Promise<GitStatusRespons
   for (const filePath of untrackedOut.split("\0").filter(Boolean)) {
     const stat = await fs.lstat(path.join(repoRoot, filePath));
     if (!stat.isFile() && !stat.isSymbolicLink()) continue;
-    const args = ["diff", "--no-index", "--no-ext-diff", "--no-textconv"];
+    const args = ["diff", "--no-index", "--no-color", "--src-prefix=a/", "--dst-prefix=b/", "--no-ext-diff", "--no-textconv"];
     const countsOut = await runGit(repoRoot, [...args, "--numstat", "-z", "--", "/dev/null", filePath], true);
     const counts = parseNumstat(countsOut).get(filePath);
     if (!counts || counts.additions + counts.deletions === 0) continue;
