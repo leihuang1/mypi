@@ -21,7 +21,6 @@ export function GitDiffPanel({ info, stale, visible, onClose, onRefresh }: {
   onRefresh: () => void;
 }) {
   const [selected, setSelected] = useState<GitFileStatus | null>(null);
-  const [expanded, setExpanded] = useState(false);
   const [diffVersion, setDiffVersion] = useState(0);
   const listRef = useRef<FlatList<GitFileStatus>>(null);
   const listOffset = useRef(0);
@@ -30,7 +29,6 @@ export function GitDiffPanel({ info, stale, visible, onClose, onRefresh }: {
   const changed = selected && (latest?.diff ?? "") !== selected.diff;
   const close = () => {
     setSelected(null);
-    setExpanded(false);
     onClose();
   };
   const back = () => setSelected(null);
@@ -43,9 +41,9 @@ export function GitDiffPanel({ info, stale, visible, onClose, onRefresh }: {
   return (
     <Modal visible={visible} transparent animationType="slide" onRequestClose={selected ? back : close}>
       <View style={styles.overlay}>
-        <Pressable style={styles.backdrop} onPress={close} accessibilityLabel="关闭改动面板" />
-        <SafeAreaView style={[styles.sheet, { height: expanded ? "94%" : "72%" }]}>
-          <View style={styles.handle} />
+        {!selected && <Pressable style={styles.backdrop} onPress={close} accessibilityLabel="关闭改动面板" />}
+        <SafeAreaView style={[styles.sheet, selected && styles.fullSheet]}>
+          {!selected && <View style={styles.handle} />}
           <View style={styles.header}>
             {selected && <Pressable onPress={back} style={styles.button} accessibilityLabel="返回文件列表"><Text style={styles.link}>‹ 列表</Text></Pressable>}
             <View style={styles.titleBlock}>
@@ -54,9 +52,6 @@ export function GitDiffPanel({ info, stale, visible, onClose, onRefresh }: {
                 {selected ? selected.path : `${files.length} 个文件`}
               </Text>
             </View>
-            <Pressable onPress={() => setExpanded((prev) => !prev)} style={styles.button} accessibilityLabel={expanded ? "收起阅读区域" : "展开阅读区域"}>
-              <Text style={styles.link}>{expanded ? "收起" : "展开"}</Text>
-            </Pressable>
             <Pressable onPress={close} style={styles.button} accessibilityLabel="关闭改动面板"><Text style={styles.close}>×</Text></Pressable>
           </View>
           <View style={styles.scopeRow}>
@@ -93,7 +88,7 @@ export function GitDiffPanel({ info, stale, visible, onClose, onRefresh }: {
                 const directory = file.path.slice(0, -name.length).replace(/\/$/, "");
                 const badge = file.status === "A" || file.status === "?" ? "新增" : file.status === "D" ? "删除" : null;
                 return (
-                  <Pressable style={styles.fileRow} onPress={() => { setSelected(file); setExpanded(true); }} accessibilityRole="button">
+                  <Pressable style={styles.fileRow} onPress={() => setSelected(file)} accessibilityRole="button">
                     <View style={styles.titleBlock}>
                       <Text style={styles.fileName} numberOfLines={1}>{name}</Text>
                       {(names.get(name) ?? 0) > 1 && <Text style={styles.caption} numberOfLines={1} ellipsizeMode="middle">{directory || "."}</Text>}
@@ -129,7 +124,8 @@ export function GitDiffPanel({ info, stale, visible, onClose, onRefresh }: {
 const styles = StyleSheet.create({
   overlay: { flex: 1, justifyContent: "flex-end", backgroundColor: "rgba(0,0,0,0.5)" },
   backdrop: { ...StyleSheet.absoluteFillObject },
-  sheet: { backgroundColor: "#111722", borderTopLeftRadius: 22, borderTopRightRadius: 22, borderWidth: 1, borderColor: "#293345", overflow: "hidden" },
+  sheet: { height: "72%", backgroundColor: "#111722", borderTopLeftRadius: 22, borderTopRightRadius: 22, borderWidth: 1, borderColor: "#293345", overflow: "hidden" },
+  fullSheet: { height: "100%", borderTopLeftRadius: 0, borderTopRightRadius: 0, borderWidth: 0 },
   handle: { width: 36, height: 4, borderRadius: 2, backgroundColor: "#475569", alignSelf: "center", marginTop: 10, marginBottom: 4 },
   header: { flexDirection: "row", alignItems: "center", gap: 4, paddingHorizontal: 12, paddingVertical: 6 },
   titleBlock: { flex: 1, minWidth: 0, gap: 4 },
