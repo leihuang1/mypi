@@ -187,6 +187,7 @@ export interface AssistantTranscriptItem {
   status: "streaming" | "done" | "aborted" | "error";
   errorMessage?: string;
   toolCalls: ToolCallItem[];
+  blocks?: ReadonlyArray<Record<string, unknown>>;
   timestamp?: number;
 }
 
@@ -345,6 +346,11 @@ export interface RawSnapshotEvent {
     blocking: boolean;
     attempt: number;
   }>;
+  compactionFailure?: {
+    taskId: number;
+    reason: string;
+    error: string;
+  };
   inbox: ReadonlyArray<{
     id: number;
     mode: "steer" | "followUp";

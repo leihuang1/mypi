@@ -4,11 +4,12 @@
   "private": true,
   "main": "index.js",
   "scripts": {
-    "start": "ANDROID_HOME=${ANDROID_HOME:-$HOME/Library/Android/sdk} PATH=\"$PATH:${ANDROID_HOME:-$HOME/Library/Android/sdk}/platform-tools\" sh -c '(while kill -0 $$ 2>/dev/null; do adb reverse tcp:8081 tcp:8081 >/dev/null 2>&1; adb reverse tcp:4780 tcp:4780 >/dev/null 2>&1; sleep 3; done) & expo start --localhost'",
+    "start": "expo start",
     "android": "ANDROID_HOME=${ANDROID_HOME:-$HOME/Library/Android/sdk} PATH=\"$PATH:${ANDROID_HOME:-$HOME/Library/Android/sdk}/platform-tools\" sh -c '(while kill -0 $$ 2>/dev/null; do adb reverse tcp:8081 tcp:8081 >/dev/null 2>&1; adb reverse tcp:4780 tcp:4780 >/dev/null 2>&1; sleep 3; done) & (sleep 2 && adb shell am start -a android.intent.action.VIEW -d exp://127.0.0.1:8081 >/dev/null 2>&1 || true) & expo start --localhost'",
     "ios": "expo run:ios",
     "web": "expo start --web",
-    "check": "tsc --noEmit"
+    "check": "tsc --noEmit",
+    "test": "tsx --test tests/*.test.ts"
   },
   "expo": {
     "install": {

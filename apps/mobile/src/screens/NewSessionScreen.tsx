@@ -1,4 +1,4 @@
-import React, { useState } from "react";
+import React, { useEffect, useRef, useState } from "react";
 import {
   ActivityIndicator,
   Platform,
@@ -57,11 +57,29 @@ export function NewSessionScreen({
   const [creating, setCreating] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
+  const mountedRef = useRef(true);
+  const createReqIdRef = useRef(0);
+
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+      createReqIdRef.current += 1;
+    };
+  }, []);
+
+  const handleCancel = () => {
+    createReqIdRef.current += 1;
+    setCreating(false);
+    onCancel();
+  };
+
   const handleCreate = async () => {
     if (!currentDir.trim()) {
       setError("Please select a project working directory.");
       return;
     }
+    const reqId = ++createReqIdRef.current;
     setCreating(true);
     setError(null);
     try {
@@ -71,11 +89,19 @@ export function NewSessionScreen({
         model: selectedModel,
         thinkingLevel,
       });
+      if (!mountedRef.current || createReqIdRef.current !== reqId) {
+        return;
+      }
       onCreated(created);
     } catch (err) {
+      if (!mountedRef.current || createReqIdRef.current !== reqId) {
+        return;
+      }
       setError(err instanceof Error ? err.message : String(err));
     } finally {
-      setCreating(false);
+      if (mountedRef.current && createReqIdRef.current === reqId) {
+        setCreating(false);
+      }
     }
   };
 
@@ -83,7 +109,7 @@ export function NewSessionScreen({
     <ScrollView style={styles.container} contentContainerStyle={styles.content}>
       <View style={styles.headerRow}>
         <Text style={styles.title}>New Durable Session</Text>
-        <Pressable onPress={onCancel} style={styles.cancelBtn}>
+        <Pressable onPress={handleCancel} style={styles.cancelBtn}>
           <Text style={styles.cancelBtnText}>Cancel</Text>
         </Pressable>
       </View>
@@ -108,7 +134,7 @@ export function NewSessionScreen({
           showsHorizontalScrollIndicator={false}
           contentContainerStyle={styles.pillsRow}
         >
-          {device.models.slice(0, 20).map((m) => {
+          {device.models.map((m) => {
             const key = `${m.provider}/${m.modelId}`;
             const active =
               selectedModel.provider === m.provider &&

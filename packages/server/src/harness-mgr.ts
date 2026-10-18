@@ -87,6 +87,10 @@ export class HarnessManager {
   private catalogPath: string;
   private catalog: CatalogData;
   private activeSessions = new Map<string, Promise<ManagedSession>>();
+  private activeSubscribers = new Set<() => Promise<void>>();
+  private inFlightOps = new Set<Promise<unknown>>();
+  private closing = false;
+  private closePromise: Promise<void> | null = null;
 
   constructor(options: {
     dataDir: string;
@@ -101,22 +105,75 @@ export class HarnessManager {
     this.catalog = this.loadCatalog();
   }
 
+  beginClose(): void {
+    this.closing = true;
+  }
+
+  isClosing(): boolean {
+    return this.closing;
+  }
+
+  private assertOpen(): void {
+    if (this.closing) {
+      throw new Error("Server is shutting down");
+    }
+  }
+
+  private trackOp<T>(fn: () => Promise<T>): Promise<T> {
+    this.assertOpen();
+    const p = fn();
+    this.inFlightOps.add(p);
+    p.finally(() => {
+      this.inFlightOps.delete(p);
+    }).catch(() => {});
+    return p;
+  }
+
   private loadCatalog(): CatalogData {
     if (fs.existsSync(this.catalogPath)) {
+      let raw: string;
       try {
-        const parsed = JSON.parse(
-          fs.readFileSync(this.catalogPath, "utf8"),
-        ) as CatalogData;
-        if (parsed && Array.isArray(parsed.sessions)) {
-          return {
-            ...parsed,
-            bookmarks: Array.isArray(parsed.bookmarks) ? parsed.bookmarks : [],
-          };
-        }
-      } catch {
-        // Fallback to new catalog
+        raw = fs.readFileSync(this.catalogPath, "utf8");
+      } catch (err) {
+        throw new Error(
+          `Failed to read catalog at ${this.catalogPath}: ${
+            err instanceof Error ? err.message : String(err)
+          }`,
+        );
       }
+
+      let parsed: unknown;
+      try {
+        parsed = JSON.parse(raw);
+      } catch (err) {
+        throw new Error(
+          `Corrupted catalog JSON at ${this.catalogPath} (refusing to overwrite): ${
+            err instanceof Error ? err.message : String(err)
+          }`,
+        );
+      }
+
+      if (
+        !parsed ||
+        typeof parsed !== "object" ||
+        !Array.isArray((parsed as CatalogData).sessions)
+      ) {
+        throw new Error(
+          `Invalid catalog structure at ${this.catalogPath} (refusing to overwrite)`,
+        );
+      }
+
+      const valid = parsed as CatalogData;
+      return {
+        ...valid,
+        deviceUid:
+          typeof valid.deviceUid === "string" && valid.deviceUid.trim()
+            ? valid.deviceUid
+            : crypto.randomUUID(),
+        bookmarks: Array.isArray(valid.bookmarks) ? valid.bookmarks : [],
+      };
     }
+
     const fresh: CatalogData = {
       deviceUid: crypto.randomUUID(),
       sessions: [],
@@ -127,7 +184,11 @@ export class HarnessManager {
   }
 
   private saveCatalog(data: CatalogData = this.catalog): void {
-    fs.writeFileSync(this.catalogPath, JSON.stringify(data, null, 2), "utf8");
+    const tmpPath = `${this.catalogPath}.${process.pid}.${Date.now()}.${crypto
+      .randomBytes(4)
+      .toString("hex")}.tmp`;
+    fs.writeFileSync(tmpPath, JSON.stringify(data, null, 2), "utf8");
+    fs.renameSync(tmpPath, this.catalogPath);
   }
 
   private expandUserPath(rawPath: string): string {
@@ -411,6 +472,7 @@ export class HarnessManager {
   }
 
   private async openManagedSession(meta: CatalogEntry): Promise<ManagedSession> {
+    this.assertOpen();
     const existing = this.activeSessions.get(meta.id);
     if (existing) return existing;
 
@@ -449,7 +511,9 @@ export class HarnessManager {
       });
 
       // Resume any unfinished durable tasks from before a crash/restart
-      harness.resume();
+      if (!this.closing) {
+        harness.resume();
+      }
 
       return {
         meta,
@@ -463,7 +527,9 @@ export class HarnessManager {
     try {
       return await promise;
     } catch (err) {
-      this.activeSessions.delete(meta.id);
+      if (!this.closing) {
+        this.activeSessions.delete(meta.id);
+      }
       throw err;
     }
   }
@@ -510,241 +576,266 @@ export class HarnessManager {
   }
 
   async listSessions(): Promise<SessionSummary[]> {
-    const sorted = [...this.catalog.sessions].sort(
-      (a, b) => b.updatedAt - a.updatedAt,
-    );
-    return Promise.all(sorted.map((s) => this.buildSessionSummary(s)));
+    return this.trackOp(async () => {
+      const sorted = [...this.catalog.sessions].sort(
+        (a, b) => b.updatedAt - a.updatedAt,
+      );
+      return Promise.all(sorted.map((s) => this.buildSessionSummary(s)));
+    });
   }
 
   async createSession(req: CreateSessionRequest): Promise<SessionSummary> {
-    const resolvedCwd = this.expandUserPath(
-      req.cwd || this.startDirs[0] || os.homedir(),
-    );
-    if (!fs.existsSync(resolvedCwd)) {
-      throw new Error(`Working directory does not exist: ${resolvedCwd}`);
-    }
+    return this.trackOp(async () => {
+      const resolvedCwd = this.expandUserPath(
+        req.cwd || this.startDirs[0] || os.homedir(),
+      );
+      if (!fs.existsSync(resolvedCwd)) {
+        throw new Error(`Working directory does not exist: ${resolvedCwd}`);
+      }
 
-    const id = crypto.randomUUID().slice(0, 8);
-    const now = Date.now();
-    const defaultName =
-      req.name?.trim() || `${path.basename(resolvedCwd)} (${id.slice(0, 4)})`;
+      const id = crypto.randomUUID().slice(0, 8);
+      const now = Date.now();
+      const defaultName =
+        req.name?.trim() || `${path.basename(resolvedCwd)} (${id.slice(0, 4)})`;
 
-    const meta: CatalogEntry = {
-      id,
-      name: defaultName,
-      cwd: resolvedCwd,
-      model: req.model ?? this.modelsConfig.defaultModel,
-      thinkingLevel: req.thinkingLevel ?? this.modelsConfig.defaultThinkingLevel,
-      createdAt: now,
-      updatedAt: now,
-    };
+      const meta: CatalogEntry = {
+        id,
+        name: defaultName,
+        cwd: resolvedCwd,
+        model: req.model ?? this.modelsConfig.defaultModel,
+        thinkingLevel:
+          req.thinkingLevel ?? this.modelsConfig.defaultThinkingLevel,
+        createdAt: now,
+        updatedAt: now,
+      };
 
-    this.catalog.sessions.push(meta);
-    this.saveCatalog();
+      this.assertOpen();
+      this.catalog.sessions.push(meta);
+      this.saveCatalog();
 
-    await this.openManagedSession(meta);
-    return this.buildSessionSummary(meta);
+      await this.openManagedSession(meta);
+      return this.buildSessionSummary(meta);
+    });
   }
 
   async getSessionSummary(sessionId: string): Promise<SessionSummary> {
-    const meta = this.catalog.sessions.find((s) => s.id === sessionId);
-    if (!meta) {
-      throw new Error(`Session not found: ${sessionId}`);
-    }
-    return this.buildSessionSummary(meta);
+    return this.trackOp(async () => {
+      const meta = this.catalog.sessions.find((s) => s.id === sessionId);
+      if (!meta) {
+        throw new Error(`Session not found: ${sessionId}`);
+      }
+      return this.buildSessionSummary(meta);
+    });
   }
 
   async updateSession(
     sessionId: string,
     req: UpdateSessionRequest,
   ): Promise<SessionSummary> {
-    const meta = this.catalog.sessions.find((s) => s.id === sessionId);
-    if (!meta) {
-      throw new Error(`Session not found: ${sessionId}`);
-    }
-
-    if (req.name && req.name.trim()) {
-      meta.name = req.name.trim();
-    }
-    if (req.model) {
-      meta.model = req.model;
-    }
-    if (req.thinkingLevel) {
-      meta.thinkingLevel = req.thinkingLevel;
-    }
-    if (req.cwd && req.cwd.trim()) {
-      const resolvedCwd = this.expandUserPath(req.cwd);
-      if (!fs.existsSync(resolvedCwd) || !fs.statSync(resolvedCwd).isDirectory()) {
-        throw new Error(`Working directory does not exist: ${resolvedCwd}`);
+    return this.trackOp(async () => {
+      const meta = this.catalog.sessions.find((s) => s.id === sessionId);
+      if (!meta) {
+        throw new Error(`Session not found: ${sessionId}`);
       }
-      meta.cwd = resolvedCwd;
-    }
-    meta.updatedAt = Date.now();
-    this.saveCatalog();
 
-    const managed = await this.openManagedSession(meta);
-    if (req.model || req.thinkingLevel || req.cwd) {
-      await managed.root.configure(
-        {
-          model: req.model ?? meta.model,
-          thinkingLevel: req.thinkingLevel ?? meta.thinkingLevel,
-          cwd: meta.cwd,
-        },
-        BACKGROUND_CONTEXT,
-      );
-    }
+      if (req.name && req.name.trim()) {
+        meta.name = req.name.trim();
+      }
+      if (req.model) {
+        meta.model = req.model;
+      }
+      if (req.thinkingLevel) {
+        meta.thinkingLevel = req.thinkingLevel;
+      }
+      if (req.cwd && req.cwd.trim()) {
+        const resolvedCwd = this.expandUserPath(req.cwd);
+        if (
+          !fs.existsSync(resolvedCwd) ||
+          !fs.statSync(resolvedCwd).isDirectory()
+        ) {
+          throw new Error(`Working directory does not exist: ${resolvedCwd}`);
+        }
+        meta.cwd = resolvedCwd;
+      }
+      meta.updatedAt = Date.now();
+      this.saveCatalog();
 
-    return this.buildSessionSummary(meta);
+      const managed = await this.openManagedSession(meta);
+      if (req.model || req.thinkingLevel || req.cwd) {
+        await managed.root.configure(
+          {
+            model: req.model ?? meta.model,
+            thinkingLevel: req.thinkingLevel ?? meta.thinkingLevel,
+            cwd: meta.cwd,
+          },
+          BACKGROUND_CONTEXT,
+        );
+      }
+
+      return this.buildSessionSummary(meta);
+    });
   }
 
   async deleteSession(sessionId: string): Promise<{ archived: boolean }> {
-    const idx = this.catalog.sessions.findIndex((s) => s.id === sessionId);
-    if (idx === -1) {
-      throw new Error(`Session not found: ${sessionId}`);
-    }
-    const [meta] = this.catalog.sessions.splice(idx, 1);
-    this.saveCatalog();
-
-    const active = this.activeSessions.get(meta.id);
-    if (active) {
-      this.activeSessions.delete(meta.id);
-      try {
-        const managed = await active;
-        await managed.root.abort(BACKGROUND_CONTEXT, { background: true });
-        await managed.harness.close(BACKGROUND_CONTEXT);
-      } catch {
-        // Ignore close errors
+    return this.trackOp(async () => {
+      const idx = this.catalog.sessions.findIndex((s) => s.id === sessionId);
+      if (idx === -1) {
+        throw new Error(`Session not found: ${sessionId}`);
       }
-    }
+      const [meta] = this.catalog.sessions.splice(idx, 1);
+      this.saveCatalog();
 
-    const sessionDir = path.join(this.dataDir, "sessions", meta.id);
-    const archiveDir = path.join(this.dataDir, "archive", meta.id);
-    if (fs.existsSync(sessionDir)) {
-      fs.mkdirSync(path.dirname(archiveDir), { recursive: true });
-      try {
-        fs.renameSync(sessionDir, archiveDir);
-      } catch {
-        // Ignore archive move error
+      const active = this.activeSessions.get(meta.id);
+      if (active) {
+        this.activeSessions.delete(meta.id);
+        try {
+          const managed = await active;
+          await managed.root.abort(BACKGROUND_CONTEXT, { background: true });
+          await managed.harness.close(BACKGROUND_CONTEXT);
+        } catch {
+          // Ignore close errors
+        }
       }
-    }
 
-    return { archived: true };
+      const sessionDir = path.join(this.dataDir, "sessions", meta.id);
+      const archiveDir = path.join(this.dataDir, "archive", meta.id);
+      if (fs.existsSync(sessionDir)) {
+        fs.mkdirSync(path.dirname(archiveDir), { recursive: true });
+        try {
+          fs.renameSync(sessionDir, archiveDir);
+        } catch {
+          // Ignore archive move error
+        }
+      }
+
+      return { archived: true };
+    });
   }
 
   async sendMessage(
     sessionId: string,
     req: SendMessageRequest,
   ): Promise<SendMessageResponse> {
-    const meta = this.catalog.sessions.find((s) => s.id === sessionId);
-    if (!meta) {
-      throw new Error(`Session not found: ${sessionId}`);
-    }
-    const managed = await this.openManagedSession(meta);
+    return this.trackOp(async () => {
+      const meta = this.catalog.sessions.find((s) => s.id === sessionId);
+      if (!meta) {
+        throw new Error(`Session not found: ${sessionId}`);
+      }
+      const managed = await this.openManagedSession(meta);
 
-    // Ensure session name auto-updates on first prompt if still generic
-    if (
-      meta.name.endsWith(`(${meta.id.slice(0, 4)})`) &&
-      req.content.trim().length > 0
-    ) {
-      const preview = req.content.trim().split(/\r?\n/)[0].slice(0, 36);
-      meta.name = `${path.basename(meta.cwd)}: ${preview}`;
-    }
-    meta.updatedAt = Date.now();
-    this.saveCatalog();
+      // Ensure session name auto-updates on first prompt if still generic
+      if (
+        meta.name.endsWith(`(${meta.id.slice(0, 4)})`) &&
+        req.content.trim().length > 0
+      ) {
+        const preview = req.content.trim().split(/\r?\n/)[0].slice(0, 36);
+        meta.name = `${path.basename(meta.cwd)}: ${preview}`;
+      }
+      meta.updatedAt = Date.now();
+      this.saveCatalog();
 
-    const submission = await managed.root.submit(
-      {
-        type: "input",
+      const submission = await managed.root.submit(
+        {
+          type: "input",
+          requestId: req.requestId,
+          content: req.content,
+          whenBusy: req.whenBusy ?? "steer",
+        },
+        BACKGROUND_CONTEXT,
+      );
+
+      managed.submissionTexts.set(submission.id, req.content);
+
+      const statusRecord = await submission.status(BACKGROUND_CONTEXT);
+      return {
+        submissionId: submission.id,
         requestId: req.requestId,
-        content: req.content,
-        whenBusy: req.whenBusy ?? "steer",
-      },
-      BACKGROUND_CONTEXT,
-    );
-
-    managed.submissionTexts.set(submission.id, req.content);
-
-    const statusRecord = await submission.status(BACKGROUND_CONTEXT);
-    return {
-      submissionId: submission.id,
-      requestId: req.requestId,
-      status: statusRecord.status,
-    };
+        status: statusRecord.status,
+      };
+    });
   }
 
   async compactSession(
     sessionId: string,
     req?: CompactSessionRequest,
   ): Promise<CompactSessionResponse> {
-    const meta = this.catalog.sessions.find((s) => s.id === sessionId);
-    if (!meta) {
-      throw new Error(`Session not found: ${sessionId}`);
-    }
-    const managed = await this.openManagedSession(meta);
-    const taskId = await managed.root.compact(
-      req?.instructions?.trim() || undefined,
-      BACKGROUND_CONTEXT,
-    );
-    meta.updatedAt = Date.now();
-    this.saveCatalog();
-    return {
-      taskId: Number(taskId),
-      status: "started",
-    };
+    return this.trackOp(async () => {
+      const meta = this.catalog.sessions.find((s) => s.id === sessionId);
+      if (!meta) {
+        throw new Error(`Session not found: ${sessionId}`);
+      }
+      const managed = await this.openManagedSession(meta);
+      const taskId = await managed.root.compact(
+        req?.instructions?.trim() || undefined,
+        BACKGROUND_CONTEXT,
+      );
+      meta.updatedAt = Date.now();
+      this.saveCatalog();
+      return {
+        taskId: Number(taskId),
+        status: "started",
+      };
+    });
   }
 
   async resetSession(
     sessionId: string,
     req?: ResetSessionRequest,
   ): Promise<ResetSessionResponse> {
-    const meta = this.catalog.sessions.find((s) => s.id === sessionId);
-    if (!meta) {
-      throw new Error(`Session not found: ${sessionId}`);
-    }
-    const managed = await this.openManagedSession(meta);
-    await managed.root.reset(
-      req?.handoff?.trim() || undefined,
-      BACKGROUND_CONTEXT,
-    );
-    meta.updatedAt = Date.now();
-    this.saveCatalog();
-    return {
-      status: "reset",
-    };
+    return this.trackOp(async () => {
+      const meta = this.catalog.sessions.find((s) => s.id === sessionId);
+      if (!meta) {
+        throw new Error(`Session not found: ${sessionId}`);
+      }
+      const managed = await this.openManagedSession(meta);
+      await managed.root.reset(
+        req?.handoff?.trim() || undefined,
+        BACKGROUND_CONTEXT,
+      );
+      meta.updatedAt = Date.now();
+      this.saveCatalog();
+      return {
+        status: "reset",
+      };
+    });
   }
 
   async abortSubmission(
     sessionId: string,
     submissionId: number,
   ): Promise<AbortSubmissionResponse> {
-    const meta = this.catalog.sessions.find((s) => s.id === sessionId);
-    if (!meta) {
-      throw new Error(`Session not found: ${sessionId}`);
-    }
-    const managed = await this.openManagedSession(meta);
-    const status = await managed.harness.abortSubmission(
-      submissionId as SubmissionId,
-      BACKGROUND_CONTEXT,
-      ROOT_CONVERSATION_ID,
-    );
-    meta.updatedAt = Date.now();
-    this.saveCatalog();
-    return {
-      submissionId,
-      status,
-    };
+    return this.trackOp(async () => {
+      const meta = this.catalog.sessions.find((s) => s.id === sessionId);
+      if (!meta) {
+        throw new Error(`Session not found: ${sessionId}`);
+      }
+      const managed = await this.openManagedSession(meta);
+      const status = await managed.harness.abortSubmission(
+        submissionId as SubmissionId,
+        BACKGROUND_CONTEXT,
+        ROOT_CONVERSATION_ID,
+      );
+      meta.updatedAt = Date.now();
+      this.saveCatalog();
+      return {
+        submissionId,
+        status,
+      };
+    });
   }
 
   async abortSession(sessionId: string): Promise<{ status: string }> {
-    const meta = this.catalog.sessions.find((s) => s.id === sessionId);
-    if (!meta) {
-      throw new Error(`Session not found: ${sessionId}`);
-    }
-    const managed = await this.openManagedSession(meta);
-    await managed.root.abort(BACKGROUND_CONTEXT, { background: true });
-    meta.updatedAt = Date.now();
-    this.saveCatalog();
-    return { status: "aborted" };
+    return this.trackOp(async () => {
+      const meta = this.catalog.sessions.find((s) => s.id === sessionId);
+      if (!meta) {
+        throw new Error(`Session not found: ${sessionId}`);
+      }
+      const managed = await this.openManagedSession(meta);
+      await managed.root.abort(BACKGROUND_CONTEXT, { background: true });
+      meta.updatedAt = Date.now();
+      this.saveCatalog();
+      return { status: "aborted" };
+    });
   }
 
   private async enrichInboxItems(
@@ -793,161 +884,211 @@ export class HarnessManager {
   }
 
   async getOpenAIUsage(): Promise<OpenAIAccountUsageResponse> {
-    const byModelMap = new Map<
-      string,
-      OpenAIAccountUsageResponse["ledger"]["byModel"][number]
-    >();
-    let totalInput = 0;
-    let totalOutput = 0;
-    let totalCacheRead = 0;
-    let totalCacheWrite = 0;
-    let totalTokens = 0;
-    let totalCost = 0;
-    let sessionCount = 0;
+    return this.trackOp(async () => {
+      const byModelMap = new Map<
+        string,
+        OpenAIAccountUsageResponse["ledger"]["byModel"][number]
+      >();
+      let totalInput = 0;
+      let totalOutput = 0;
+      let totalCacheRead = 0;
+      let totalCacheWrite = 0;
+      let totalTokens = 0;
+      let totalCost = 0;
+      let sessionCount = 0;
 
-    for (const meta of this.catalog.sessions) {
-      try {
-        const managed = await this.openManagedSession(meta);
-        const usageState = await managed.harness.usage(BACKGROUND_CONTEXT);
-        let sessionHasOpenAI = false;
+      for (const meta of this.catalog.sessions) {
+        if (this.closing) break;
+        try {
+          const managed = await this.openManagedSession(meta);
+          const usageState = await managed.harness.usage(BACKGROUND_CONTEXT);
+          let sessionHasOpenAI = false;
 
-        for (const [modelKey, u] of Object.entries(usageState.models ?? {})) {
-          if (
-            modelKey.startsWith("openai/") ||
-            modelKey.startsWith("openai-codex/")
-          ) {
-            sessionHasOpenAI = true;
-            const input = u.input ?? 0;
-            const output = u.output ?? 0;
-            const cacheRead = u.cacheRead ?? 0;
-            const cacheWrite = u.cacheWrite ?? 0;
-            const tokens =
-              u.totalTokens ?? input + output + cacheRead + cacheWrite;
-            const cost = u.cost?.total ?? 0;
+          for (const [modelKey, u] of Object.entries(usageState.models ?? {})) {
+            if (
+              modelKey.startsWith("openai/") ||
+              modelKey.startsWith("openai-codex/")
+            ) {
+              sessionHasOpenAI = true;
+              const input = u.input ?? 0;
+              const output = u.output ?? 0;
+              const cacheRead = u.cacheRead ?? 0;
+              const cacheWrite = u.cacheWrite ?? 0;
+              const tokens =
+                u.totalTokens ?? input + output + cacheRead + cacheWrite;
+              const cost = u.cost?.total ?? 0;
 
-            totalInput += input;
-            totalOutput += output;
-            totalCacheRead += cacheRead;
-            totalCacheWrite += cacheWrite;
-            totalTokens += tokens;
-            totalCost += cost;
+              totalInput += input;
+              totalOutput += output;
+              totalCacheRead += cacheRead;
+              totalCacheWrite += cacheWrite;
+              totalTokens += tokens;
+              totalCost += cost;
 
-            const existing = byModelMap.get(modelKey) ?? {
-              modelId: modelKey,
-              inputTokens: 0,
-              outputTokens: 0,
-              totalTokens: 0,
-              totalCost: 0,
-            };
-            existing.inputTokens += input;
-            existing.outputTokens += output;
-            existing.totalTokens += tokens;
-            existing.totalCost += cost;
-            byModelMap.set(modelKey, existing);
+              const existing = byModelMap.get(modelKey) ?? {
+                modelId: modelKey,
+                inputTokens: 0,
+                outputTokens: 0,
+                totalTokens: 0,
+                totalCost: 0,
+              };
+              existing.inputTokens += input;
+              existing.outputTokens += output;
+              existing.totalTokens += tokens;
+              existing.totalCost += cost;
+              byModelMap.set(modelKey, existing);
+            }
           }
-        }
 
-        if (sessionHasOpenAI) {
-          sessionCount += 1;
+          if (sessionHasOpenAI) {
+            sessionCount += 1;
+          }
+        } catch {
+          // Ignore individual session read failures
         }
-      } catch {
-        // Ignore individual session read failures
       }
-    }
 
-    const auth = this.modelsConfig.openaiAuth;
-    return {
-      provider: "openai",
-      configured: auth.configured,
-      authType: auth.authType,
-      subscriptionLabel: auth.subscriptionLabel,
-      tokenExpiresAt: auth.tokenExpiresAt,
-      dashboardUrl:
-        auth.authType === "oauth"
-          ? "https://chatgpt.com/settings/usage"
-          : "https://platform.openai.com/usage",
-      rateLimits: this.modelsConfig.getOpenAIRateLimits(),
-      ledger: {
-        sessionCount,
-        inputTokens: totalInput,
-        outputTokens: totalOutput,
-        cacheReadTokens: totalCacheRead,
-        cacheWriteTokens: totalCacheWrite,
-        totalTokens,
-        totalCost,
-        byModel: Array.from(byModelMap.values()).sort(
-          (a, b) => b.totalTokens - a.totalTokens,
-        ),
-      },
-      updatedAt: Date.now(),
-    };
+      const auth = this.modelsConfig.openaiAuth;
+      return {
+        provider: "openai",
+        configured: auth.configured,
+        authType: auth.authType,
+        subscriptionLabel: auth.subscriptionLabel,
+        tokenExpiresAt: auth.tokenExpiresAt,
+        dashboardUrl:
+          auth.authType === "oauth"
+            ? "https://chatgpt.com/settings/usage"
+            : "https://platform.openai.com/usage",
+        rateLimits: this.modelsConfig.getOpenAIRateLimits(),
+        ledger: {
+          sessionCount,
+          inputTokens: totalInput,
+          outputTokens: totalOutput,
+          cacheReadTokens: totalCacheRead,
+          cacheWriteTokens: totalCacheWrite,
+          totalTokens,
+          totalCost,
+          byModel: Array.from(byModelMap.values()).sort(
+            (a, b) => b.totalTokens - a.totalTokens,
+          ),
+        },
+        updatedAt: Date.now(),
+      };
+    });
   }
 
   async subscribeSession(
     sessionId: string,
     onFrame: (frame: SseFrame) => void,
   ): Promise<() => Promise<void>> {
-    const meta = this.catalog.sessions.find((s) => s.id === sessionId);
-    if (!meta) {
-      throw new Error(`Session not found: ${sessionId}`);
-    }
-    const managed = await this.openManagedSession(meta);
-    const summary = await this.buildSessionSummary(meta);
+    return this.trackOp(async () => {
+      const meta = this.catalog.sessions.find((s) => s.id === sessionId);
+      if (!meta) {
+        throw new Error(`Session not found: ${sessionId}`);
+      }
+      const managed = await this.openManagedSession(meta);
+      const summary = await this.buildSessionSummary(meta);
 
-    onFrame({
-      type: "hello",
-      apiVersion: 1,
-      sessionId: meta.id,
-      serverTime: Date.now(),
+      onFrame({
+        type: "hello",
+        apiVersion: 1,
+        sessionId: meta.id,
+        serverTime: Date.now(),
+      });
+
+      const stream = await watchEvents(
+        managed.harness,
+        ROOT_CONVERSATION_ID,
+        BACKGROUND_CONTEXT,
+      );
+
+      const rawSnapshot = stream.snapshot as unknown as RawSnapshotEvent;
+      const enrichedInbox = await this.enrichInboxItems(
+        managed,
+        rawSnapshot.inbox ?? [],
+      );
+
+      onFrame({
+        type: "snapshot",
+        session: summary,
+        snapshot: {
+          ...rawSnapshot,
+          inbox: enrichedInbox,
+        },
+      });
+
+      stream.start(async (events) => {
+        const rawEvents = events as unknown as RawAgentEvent[];
+        const enrichedEvents: RawAgentEvent[] = [];
+        for (const ev of rawEvents) {
+          if (ev.type === "inbox_update") {
+            const items = await this.enrichInboxItems(managed, ev.items);
+            enrichedEvents.push({
+              ...ev,
+              items,
+            });
+          } else {
+            enrichedEvents.push(ev);
+          }
+        }
+        onFrame({
+          type: "events",
+          events: enrichedEvents,
+        });
+      });
+
+      let stopped = false;
+      const unsubscribe = async () => {
+        if (stopped) return;
+        stopped = true;
+        this.activeSubscribers.delete(unsubscribe);
+        try {
+          await stream.stop();
+        } catch {
+          // Ignore stop error
+        }
+      };
+
+      this.activeSubscribers.add(unsubscribe);
+      if (this.closing) {
+        await unsubscribe();
+        throw new Error("Server is shutting down");
+      }
+      return unsubscribe;
     });
+  }
 
-    const stream = await watchEvents(
-      managed.harness,
-      ROOT_CONVERSATION_ID,
-      BACKGROUND_CONTEXT,
-    );
-
-    const rawSnapshot = stream.snapshot as unknown as RawSnapshotEvent;
-    const enrichedInbox = await this.enrichInboxItems(
-      managed,
-      rawSnapshot.inbox ?? [],
-    );
-
-    onFrame({
-      type: "snapshot",
-      session: summary,
-      snapshot: {
-        ...rawSnapshot,
-        inbox: enrichedInbox,
-      },
-    });
-
-    stream.start(async (events) => {
-      const rawEvents = events as unknown as RawAgentEvent[];
-      const enrichedEvents: RawAgentEvent[] = [];
-      for (const ev of rawEvents) {
-        if (ev.type === "inbox_update") {
-          const items = await this.enrichInboxItems(managed, ev.items);
-          enrichedEvents.push({
-            ...ev,
-            items,
-          });
-        } else {
-          enrichedEvents.push(ev);
+  async close(): Promise<void> {
+    if (this.closePromise) return this.closePromise;
+    this.closing = true;
+    this.closePromise = (async () => {
+      while (
+        this.inFlightOps.size > 0 ||
+        this.activeSubscribers.size > 0 ||
+        this.activeSessions.size > 0
+      ) {
+        if (this.inFlightOps.size > 0) {
+          await Promise.allSettled(Array.from(this.inFlightOps));
+        }
+        if (this.activeSubscribers.size > 0) {
+          const subs = Array.from(this.activeSubscribers);
+          this.activeSubscribers.clear();
+          await Promise.allSettled(subs.map((unsub) => unsub()));
+        }
+        if (this.activeSessions.size > 0) {
+          const entries = Array.from(this.activeSessions.entries());
+          for (const [id] of entries) {
+            this.activeSessions.delete(id);
+          }
+          await Promise.allSettled(
+            entries.map(async ([, promise]) => {
+              const managed = await promise;
+              await managed.harness.close(BACKGROUND_CONTEXT);
+            }),
+          );
         }
       }
-      onFrame({
-        type: "events",
-        events: enrichedEvents,
-      });
-    });
-
-    return async () => {
-      try {
-        await stream.stop();
-      } catch {
-        // Ignore stop error
-      }
-    };
+    })();
+    return this.closePromise;
   }
 }

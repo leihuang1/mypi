@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 import {
   ActivityIndicator,
   Platform,
@@ -84,10 +84,21 @@ export function FileBrowserPanel({
   );
   const [loadingFile, setLoadingFile] = useState(false);
 
+  // Sequence numbers to prevent out-of-order responses from overwriting latest selection
+  const dirReqIdRef = useRef(0);
+  const previewReqIdRef = useRef(0);
+
+  const clearPreviewState = () => {
+    previewReqIdRef.current += 1;
+    setPreviewFile(null);
+    setLoadingFile(false);
+  };
+
   const loadDir = async (
     targetPath?: string,
     hiddenOverride?: boolean,
   ): Promise<void> => {
+    const reqId = ++dirReqIdRef.current;
     const useHidden =
       hiddenOverride !== undefined ? hiddenOverride : includeHidden;
     setLoading(true);
@@ -96,18 +107,26 @@ export function FileBrowserPanel({
       const res = await client.listDirs(targetPath, {
         includeHidden: useHidden,
       });
+      if (dirReqIdRef.current !== reqId) return;
       setListing(res);
       setPathInputValue(res.path);
       onSelectDirectory?.(res.path);
     } catch (err) {
+      if (dirReqIdRef.current !== reqId) return;
       setError(err instanceof Error ? err.message : String(err));
     } finally {
-      setLoading(false);
+      if (dirReqIdRef.current === reqId) {
+        setLoading(false);
+      }
     }
   };
 
   useEffect(() => {
     void loadDir(initialPath || sessionCwd || startDirs[0] || undefined);
+    return () => {
+      dirReqIdRef.current += 1;
+      previewReqIdRef.current += 1;
+    };
   }, []);
 
   const currentPath = listing?.path || initialPath || "";
@@ -214,15 +233,20 @@ export function FileBrowserPanel({
   };
 
   const handleOpenFilePreview = async (filePath: string) => {
+    const reqId = ++previewReqIdRef.current;
     setLoadingFile(true);
     setError(null);
     try {
       const preview = await client.readFilePreview(filePath);
+      if (previewReqIdRef.current !== reqId) return;
       setPreviewFile(preview);
     } catch (err) {
+      if (previewReqIdRef.current !== reqId) return;
       setError(err instanceof Error ? err.message : String(err));
     } finally {
-      setLoadingFile(false);
+      if (previewReqIdRef.current === reqId) {
+        setLoadingFile(false);
+      }
     }
   };
 
@@ -256,7 +280,7 @@ export function FileBrowserPanel({
                 <Pressable
                   style={styles.breadcrumbChip}
                   onPress={() => {
-                    setPreviewFile(null);
+                    clearPreviewState();
                     void loadDir(bc.path);
                   }}
                 >
@@ -348,7 +372,7 @@ export function FileBrowserPanel({
             <Pressable
               style={styles.upChip}
               onPress={() => {
-                setPreviewFile(null);
+                clearPreviewState();
                 void loadDir(listing.parent!);
               }}
             >
@@ -363,7 +387,7 @@ export function FileBrowserPanel({
                 b === currentPath ? styles.chipActive : null,
               ]}
               onPress={() => {
-                setPreviewFile(null);
+                clearPreviewState();
                 void loadDir(b);
               }}
             >
@@ -380,7 +404,7 @@ export function FileBrowserPanel({
                 r === currentPath ? styles.chipActive : null,
               ]}
               onPress={() => {
-                setPreviewFile(null);
+                clearPreviewState();
                 void loadDir(r);
               }}
             >
@@ -557,7 +581,7 @@ export function FileBrowserPanel({
             )}
             <Pressable
               style={styles.closePreviewBtn}
-              onPress={() => setPreviewFile(null)}
+              onPress={() => clearPreviewState()}
             >
               <Text style={styles.closePreviewText}>✕ Close</Text>
             </Pressable>
@@ -593,7 +617,7 @@ export function FileBrowserPanel({
               <Pressable
                 style={styles.entryMainPress}
                 onPress={() => {
-                  setPreviewFile(null);
+                  clearPreviewState();
                   void loadDir(d.path);
                 }}
               >

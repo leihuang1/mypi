@@ -117,7 +117,35 @@ export async function startMyPiServer(options?: {
     modelsConfig,
   });
 
-  const server = createServer(createRequestHandler({ manager, token }));
+  const activeResponses = new Set<import("node:http").ServerResponse>();
+  const inFlightRequests = new Set<Promise<void>>();
+  const requestHandler = createRequestHandler({
+    manager,
+    token,
+    activeResponses,
+  });
+
+  const server = createServer((req, res) => {
+    const p = Promise.resolve(requestHandler(req, res))
+      .catch((err) => {
+        console.error("[mypi-server] Unhandled request error:", err);
+        if (!res.headersSent) {
+          res.statusCode = 500;
+          res.setHeader("Content-Type", "application/json; charset=utf-8");
+          res.end(
+            JSON.stringify({
+              error: { code: "internal", message: "Internal server error" },
+            }),
+          );
+        } else if (!res.writableEnded) {
+          res.end();
+        }
+      })
+      .finally(() => {
+        inFlightRequests.delete(p);
+      });
+    inFlightRequests.add(p);
+  });
 
   await new Promise<void>((resolve, reject) => {
     server.once("error", reject);
@@ -168,11 +196,29 @@ export async function startMyPiServer(options?: {
     port: actualPort,
     token,
     manager,
-    close: () =>
-      new Promise<void>((resolve) => {
-        stopAdbKeepAlive();
+    close: async () => {
+      stopAdbKeepAlive();
+      manager.beginClose();
+      const serverClosePromise = new Promise<void>((resolve) => {
         server.close(() => resolve());
-      }),
+      });
+      for (const res of Array.from(activeResponses)) {
+        try {
+          if (!res.writableEnded) {
+            res.end();
+          }
+        } catch {
+          // Ignore
+        }
+      }
+      activeResponses.clear();
+      if (inFlightRequests.size > 0) {
+        await Promise.allSettled(Array.from(inFlightRequests));
+      }
+      await manager.close();
+      server.closeAllConnections?.();
+      await serverClosePromise;
+    },
   };
 }
 

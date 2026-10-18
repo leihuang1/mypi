@@ -83,6 +83,8 @@ export function normalizeBaseUrl(url: string): string {
 
 export class SseParser {
   private buffer = "";
+  private consumedChars = 0;
+  private snapshotBaselineChars: number | null = null;
 
   feed(chunk: string): SseFrame[] {
     this.buffer += chunk;
@@ -90,8 +92,10 @@ export class SseParser {
 
     let boundary = this.buffer.indexOf("\n\n");
     while (boundary !== -1) {
+      const prevConsumed = this.consumedChars;
       const rawBlock = this.buffer.slice(0, boundary);
       this.buffer = this.buffer.slice(boundary + 2);
+      this.consumedChars += boundary + 2;
       boundary = this.buffer.indexOf("\n\n");
 
       const dataLines: string[] = [];
@@ -104,7 +108,16 @@ export class SseParser {
       if (dataLines.length > 0) {
         const payload = dataLines.join("\n");
         try {
-          frames.push(JSON.parse(payload) as SseFrame);
+          const frame = JSON.parse(payload) as SseFrame;
+          if (frame.type === "snapshot") {
+            this.snapshotBaselineChars = this.consumedChars;
+          } else if (
+            frame.type !== "hello" &&
+            this.snapshotBaselineChars === null
+          ) {
+            this.snapshotBaselineChars = prevConsumed;
+          }
+          frames.push(frame);
         } catch {
           // Ignore malformed frame
         }
@@ -112,6 +125,17 @@ export class SseParser {
     }
 
     return frames;
+  }
+
+  hasPendingPartial(): boolean {
+    return this.buffer.trim().length > 0;
+  }
+
+  getPostSnapshotConsumedChars(): number {
+    if (this.snapshotBaselineChars === null) {
+      return 0;
+    }
+    return Math.max(0, this.consumedChars - this.snapshotBaselineChars);
   }
 }
 
@@ -327,16 +351,25 @@ export class MyPiClient {
     sessionId: string,
     handlers: {
       onFrame: (frame: SseFrame) => void;
-      onStatusChange?: (status: "connecting" | "connected" | "reconnecting" | "error", error?: string) => void;
+      onStatusChange?: (
+        status: "connecting" | "connected" | "reconnecting" | "error",
+        error?: string,
+      ) => void;
+      maxXhrBufferChars?: number;
     },
   ): () => void {
     let stopped = false;
     let abortStream: (() => void) | null = null;
     let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+    const maxXhrBufferChars = handlers.maxXhrBufferChars ?? 512 * 1024;
     const url = `${this.baseUrl}/v1/sessions/${encodeURIComponent(sessionId)}/events`;
 
     const connect = (isReconnect: boolean) => {
       if (stopped) return;
+      if (reconnectTimer) {
+        clearTimeout(reconnectTimer);
+        reconnectTimer = null;
+      }
       handlers.onStatusChange?.(isReconnect ? "reconnecting" : "connecting");
 
       // Prefer XMLHttpRequest in React Native environments where fetch ReadableStream may be unavailable
@@ -344,6 +377,7 @@ export class MyPiClient {
         const xhr = new XMLHttpRequest();
         const parser = new SseParser();
         let processedLength = 0;
+        let attemptClosed = false;
 
         xhr.open("GET", url, true);
         xhr.setRequestHeader("Authorization", `Bearer ${this.token}`);
@@ -351,32 +385,52 @@ export class MyPiClient {
         xhr.setRequestHeader("Accept", "text/event-stream");
 
         xhr.onreadystatechange = () => {
-          if (stopped) return;
-          if (xhr.readyState === XMLHttpRequest.HEADERS_RECEIVED && xhr.status === 200) {
+          if (stopped || attemptClosed) return;
+          if (
+            xhr.readyState === XMLHttpRequest.HEADERS_RECEIVED &&
+            xhr.status === 200
+          ) {
             handlers.onStatusChange?.("connected");
           }
         };
 
         xhr.onprogress = () => {
-          if (stopped) return;
+          if (stopped || attemptClosed) return;
           const text = xhr.responseText || "";
           const delta = text.slice(processedLength);
           processedLength = text.length;
           if (delta) {
             for (const frame of parser.feed(delta)) {
+              if (stopped || attemptClosed) return;
               handlers.onFrame(frame);
             }
+          }
+          // Rotate XHR stream once post-snapshot consumed buffer reaches threshold at a clean frame boundary
+          if (
+            !stopped &&
+            !attemptClosed &&
+            parser.getPostSnapshotConsumedChars() >= maxXhrBufferChars &&
+            !parser.hasPendingPartial()
+          ) {
+            attemptClosed = true;
+            xhr.abort();
+            connect(true);
           }
         };
 
         xhr.onerror = () => {
-          if (stopped) return;
-          handlers.onStatusChange?.("reconnecting", "Network stream disconnected");
+          if (stopped || attemptClosed) return;
+          attemptClosed = true;
+          handlers.onStatusChange?.(
+            "reconnecting",
+            "Network stream disconnected",
+          );
           scheduleReconnect();
         };
 
         xhr.onloadend = () => {
-          if (stopped) return;
+          if (stopped || attemptClosed) return;
+          attemptClosed = true;
           if (xhr.status === 401 || xhr.status === 404) {
             handlers.onStatusChange?.("error", `HTTP ${xhr.status}`);
             return;
@@ -384,14 +438,23 @@ export class MyPiClient {
           scheduleReconnect();
         };
 
-        abortStream = () => xhr.abort();
+        abortStream = () => {
+          if (attemptClosed) return;
+          attemptClosed = true;
+          xhr.abort();
+        };
         xhr.send();
         return;
       }
 
       // Node.js / modern fetch ReadableStream
+      let attemptClosed = false;
       const controller = new AbortController();
-      abortStream = () => controller.abort();
+      abortStream = () => {
+        if (attemptClosed) return;
+        attemptClosed = true;
+        controller.abort();
+      };
 
       (async () => {
         try {
@@ -405,28 +468,35 @@ export class MyPiClient {
           });
           if (!res.ok || !res.body) {
             if (res.status === 401 || res.status === 404) {
+              attemptClosed = true;
               handlers.onStatusChange?.("error", `HTTP ${res.status}`);
               return;
             }
             throw new Error(`HTTP ${res.status}`);
           }
 
+          if (stopped || attemptClosed) return;
           handlers.onStatusChange?.("connected");
           const reader = res.body.getReader();
           const decoder = new TextDecoder();
           const parser = new SseParser();
 
-          while (!stopped) {
+          while (!stopped && !attemptClosed) {
             const { done, value } = await reader.read();
             if (done) break;
             const chunk = decoder.decode(value, { stream: true });
             for (const frame of parser.feed(chunk)) {
+              if (stopped || attemptClosed) return;
               handlers.onFrame(frame);
             }
           }
-          if (!stopped) scheduleReconnect();
+          if (!stopped && !attemptClosed) {
+            attemptClosed = true;
+            scheduleReconnect();
+          }
         } catch (err) {
-          if (stopped) return;
+          if (stopped || attemptClosed) return;
+          attemptClosed = true;
           handlers.onStatusChange?.(
             "reconnecting",
             err instanceof Error ? err.message : String(err),
@@ -446,7 +516,10 @@ export class MyPiClient {
 
     return () => {
       stopped = true;
-      if (reconnectTimer) clearTimeout(reconnectTimer);
+      if (reconnectTimer) {
+        clearTimeout(reconnectTimer);
+        reconnectTimer = null;
+      }
       abortStream?.();
     };
   }

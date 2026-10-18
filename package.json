@@ -15,6 +15,6 @@
     "mobile:ios": "npm --workspace=@mypi/mobile run ios",
     "mobile:web": "npm --workspace=@mypi/mobile run web",
     "check": "npm --workspace=@mypi/shared run check && npm --workspace=@mypi/server run check && npm --workspace=@mypi/mobile run check",
-    "test": "npm --workspace=@mypi/shared run test && npm --workspace=@mypi/server run test"
+    "test": "npm --workspace=@mypi/shared run test && npm --workspace=@mypi/server run test && npm --workspace=@mypi/mobile run test"
   }
 }

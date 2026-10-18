@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 import {
   ActivityIndicator,
   Platform,
@@ -18,6 +18,7 @@ import {
 import { NewSessionScreen } from "./src/screens/NewSessionScreen";
 import { PairServerScreen } from "./src/screens/PairServerScreen";
 import { SessionDetailScreen } from "./src/screens/SessionDetailScreen";
+import type { AppScreenName } from "./src/store/session-lifecycle";
 import {
   loadSavedServers,
   removeServerProfile,
@@ -35,9 +36,7 @@ const MONO_FONT = Platform.select({
 export default function App() {
   const [servers, setServers] = useState<SavedServerProfile[]>([]);
   const [activeServerId, setActiveId] = useState<string | null>(null);
-  const [screen, setScreen] = useState<
-    "sessions" | "pair" | "new-session" | "session-detail"
-  >("sessions");
+  const [screen, setScreen] = useState<AppScreenName>("sessions");
 
   const [device, setDevice] = useState<DeviceInfo | null>(null);
   const [sessions, setSessions] = useState<SessionSummary[]>([]);
@@ -46,6 +45,19 @@ export default function App() {
   );
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+
+  const hubReqIdRef = useRef(0);
+  const navEpochRef = useRef(0);
+  const screenRef = useRef<AppScreenName>(screen);
+  screenRef.current = screen;
+  const activeServerIdRef = useRef<string | null>(null);
+  activeServerIdRef.current = activeServerId;
+
+  const navigateToScreen = (nextScreen: AppScreenName) => {
+    navEpochRef.current += 1;
+    screenRef.current = nextScreen;
+    setScreen(nextScreen);
+  };
 
   const activeServer = useMemo(
     () => servers.find((s) => s.id === activeServerId) ?? null,
@@ -63,20 +75,32 @@ export default function App() {
     [activeServer],
   );
 
+  const resetServerScopedState = () => {
+    hubReqIdRef.current += 1;
+    navEpochRef.current += 1;
+    setDevice(null);
+    setSessions([]);
+    setActiveSession(null);
+    setError(null);
+  };
+
   useEffect(() => {
     (async () => {
       const stored = await loadSavedServers();
       setServers(stored.servers);
       setActiveId(stored.activeId);
+      activeServerIdRef.current = stored.activeId;
       if (stored.servers.length === 0) {
-        setScreen("pair");
+        navigateToScreen("pair");
       }
       setLoading(false);
     })();
   }, []);
 
   const refreshHub = async () => {
-    if (!client) return;
+    if (!client || !activeServerId) return;
+    const reqId = ++hubReqIdRef.current;
+    const targetServerId = activeServerId;
     setLoading(true);
     setError(null);
     try {
@@ -84,12 +108,29 @@ export default function App() {
         client.getDevice(),
         client.listSessions(),
       ]);
+      if (
+        hubReqIdRef.current !== reqId ||
+        activeServerIdRef.current !== targetServerId
+      ) {
+        return;
+      }
       setDevice(dev);
       setSessions(sessList);
     } catch (err) {
+      if (
+        hubReqIdRef.current !== reqId ||
+        activeServerIdRef.current !== targetServerId
+      ) {
+        return;
+      }
       setError(err instanceof Error ? err.message : String(err));
     } finally {
-      setLoading(false);
+      if (
+        hubReqIdRef.current === reqId &&
+        activeServerIdRef.current === targetServerId
+      ) {
+        setLoading(false);
+      }
     }
   };
 
@@ -105,31 +146,65 @@ export default function App() {
     token: string;
   }) => {
     const res = await saveServerProfile(profile);
+    if (res.active.id !== activeServerIdRef.current) {
+      resetServerScopedState();
+    }
     setServers(res.servers);
     setActiveId(res.active.id);
-    setScreen("sessions");
+    activeServerIdRef.current = res.active.id;
+    navigateToScreen("sessions");
   };
 
   const handleSelectServer = async (id: string) => {
     await setActiveServerId(id);
+    if (id !== activeServerIdRef.current) {
+      resetServerScopedState();
+    }
     setActiveId(id);
-    setScreen("sessions");
+    activeServerIdRef.current = id;
+    navigateToScreen("sessions");
   };
 
   const handleDeleteServer = async (id: string) => {
     const next = await removeServerProfile(id);
+    const nextActiveId = next[0]?.id ?? null;
+    if (nextActiveId !== activeServerIdRef.current) {
+      resetServerScopedState();
+    }
     setServers(next);
-    setActiveId(next[0]?.id ?? null);
+    setActiveId(nextActiveId);
+    activeServerIdRef.current = nextActiveId;
   };
 
   const handleDeleteSession = async (sessionId: string) => {
     if (!client) return;
+    const targetServerId = activeServerId;
     try {
       await client.deleteSession(sessionId);
+      if (activeServerIdRef.current !== targetServerId) return;
       setSessions((prev) => prev.filter((s) => s.id !== sessionId));
+      setActiveSession((prev) => (prev?.id === sessionId ? null : prev));
     } catch (err) {
+      if (activeServerIdRef.current !== targetServerId) return;
       setError(err instanceof Error ? err.message : String(err));
     }
+  };
+
+  const currentNavEpoch = navEpochRef.current;
+
+  const handleSessionCreated = (created: SessionSummary) => {
+    if (activeServerIdRef.current !== activeServerId) return;
+    setSessions((prev) => [created, ...prev.filter((s) => s.id !== created.id)]);
+    if (screenRef.current === "new-session" && navEpochRef.current === currentNavEpoch) {
+      setActiveSession(created);
+      navigateToScreen("session-detail");
+    }
+  };
+
+  const handleSessionUpdated = (updated: SessionSummary) => {
+    if (activeServerIdRef.current !== activeServerId) return;
+    setActiveSession((prev) => prev?.id === updated.id ? updated : prev);
+    setSessions((prev) => prev.map((s) => s.id === updated.id ? updated : s));
   };
 
   return (
@@ -143,33 +218,24 @@ export default function App() {
           onSaveProfile={handleSaveProfile}
           onSelectServer={handleSelectServer}
           onDeleteServer={handleDeleteServer}
-          onCancel={activeServer ? () => setScreen("sessions") : undefined}
+          onCancel={activeServer ? () => navigateToScreen("sessions") : undefined}
         />
       ) : screen === "new-session" && device ? (
         <NewSessionScreen
           client={client}
           device={device}
-          onCreated={(created) => {
-            setSessions((prev) => [created, ...prev]);
-            setActiveSession(created);
-            setScreen("session-detail");
-          }}
-          onCancel={() => setScreen("sessions")}
+          onCreated={handleSessionCreated}
+          onCancel={() => navigateToScreen("sessions")}
         />
       ) : screen === "session-detail" && activeSession ? (
         <SessionDetailScreen
           client={client}
           device={device ?? undefined}
           session={activeSession}
-          onSessionUpdated={(updated) => {
-            setActiveSession(updated);
-            setSessions((prev) =>
-              prev.map((s) => (s.id === updated.id ? updated : s)),
-            );
-          }}
+          onSessionUpdated={handleSessionUpdated}
           onBack={() => {
             setActiveSession(null);
-            setScreen("sessions");
+            navigateToScreen("sessions");
           }}
         />
       ) : (
@@ -191,13 +257,13 @@ export default function App() {
             <View style={styles.headerActions}>
               <Pressable
                 style={styles.serverBtn}
-                onPress={() => setScreen("pair")}
+                onPress={() => navigateToScreen("pair")}
               >
                 <Text style={styles.serverBtnText}>⚙ Server</Text>
               </Pressable>
               <Pressable
                 style={[styles.newBtn, !device ? styles.btnDisabled : null]}
-                onPress={() => device && setScreen("new-session")}
+                onPress={() => device && navigateToScreen("new-session")}
                 disabled={!device}
               >
                 <Text style={styles.newBtnText}>+ New</Text>
@@ -244,7 +310,7 @@ export default function App() {
                 {device && (
                   <Pressable
                     style={styles.primaryCta}
-                    onPress={() => setScreen("new-session")}
+                    onPress={() => navigateToScreen("new-session")}
                   >
                     <Text style={styles.primaryCtaText}>
                       + Create First Session
@@ -259,7 +325,7 @@ export default function App() {
                   style={styles.sessionCard}
                   onPress={() => {
                     setActiveSession(sess);
-                    setScreen("session-detail");
+                    navigateToScreen("session-detail");
                   }}
                 >
                   <View style={styles.sessionCardTop}>

@@ -19,6 +19,7 @@ import {
   type ModelRef,
   type MyPiClient,
   reduceSseFrame,
+  type SendMessageRequest,
   type SessionLiveState,
   type SessionSummary,
   type ThinkingLevel,
@@ -27,6 +28,10 @@ import {
 import { FileBrowserPanel } from "../components/FileBrowserPanel";
 import { GitDiffPanel } from "../components/GitDiffPanel";
 import { ToolCallCard } from "../components/ToolCallCard";
+import {
+  type FailedSubmissionDraft,
+  restoreFailedDraftToInput,
+} from "../store/session-lifecycle";
 
 const MONO_FONT = Platform.select({
   ios: "Menlo",
@@ -181,9 +186,39 @@ export function SessionDetailScreen({
   >("connecting");
   const [connError, setConnError] = useState<string | null>(null);
   const [inputText, setInputText] = useState("");
+  const [failedDraft, setFailedDraft] = useState<FailedSubmissionDraft | null>(
+    null,
+  );
   const [sending, setSending] = useState(false);
   const [streamGeneration, setStreamGeneration] = useState(0);
   const scrollRef = useRef<ScrollView | null>(null);
+  const isNearBottomRef = useRef(true);
+  const mountedRef = useRef(true);
+  const currentSessionIdRef = useRef(session.id);
+  currentSessionIdRef.current = session.id;
+  const inputTextRef = useRef(inputText);
+  inputTextRef.current = inputText;
+
+  const updateInputText = (
+    next: string | ((prev: string) => string),
+  ): void => {
+    const resolved =
+      typeof next === "function" ? next(inputTextRef.current) : next;
+    inputTextRef.current = resolved;
+    setInputText(resolved);
+  };
+
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+    };
+  }, []);
+
+  useEffect(() => {
+    updateInputText("");
+    setFailedDraft(null);
+  }, [session.id]);
 
   // Separated Top Popovers:
   // - "rename": tapped top session title -> rename session or jump to CWD
@@ -246,6 +281,28 @@ export function SessionDetailScreen({
     setQuickBrowsePath(activeCwd);
   }, [activeCwd]);
 
+  // Auto-scroll only when near bottom and transcript messages/streaming actually advance
+  const lastTranscriptItem = liveState.items[liveState.items.length - 1];
+  const transcriptAdvanceKey = useMemo(() => {
+    if (!lastTranscriptItem) return "0";
+    if (lastTranscriptItem.kind === "assistant") {
+      const toolOutLen = lastTranscriptItem.toolCalls.reduce(
+        (acc, t) => acc + t.output.length + t.status.length,
+        0,
+      );
+      return `${liveState.items.length}:${lastTranscriptItem.id}:${lastTranscriptItem.status}:${lastTranscriptItem.thinking.length}:${lastTranscriptItem.text.length}:${lastTranscriptItem.toolCalls.length}:${toolOutLen}`;
+    }
+    return `${liveState.items.length}:${lastTranscriptItem.id}:${lastTranscriptItem.text.length}`;
+  }, [liveState.items.length, lastTranscriptItem]);
+
+  useEffect(() => {
+    if (activeTab === "chat" && isNearBottomRef.current) {
+      requestAnimationFrame(() => {
+        scrollRef.current?.scrollToEnd({ animated: true });
+      });
+    }
+  }, [transcriptAdvanceKey, activeTab]);
+
   const modelMeta = useMemo(
     () =>
       device?.models.find(
@@ -285,44 +342,77 @@ export function SessionDetailScreen({
     };
   }, [bottomTray, quickBrowsePath, activeCwd, client]);
 
+  const submitMessage = async (request: SendMessageRequest) => {
+    const targetSessionId = session.id;
+    setSending(true);
+    try {
+      await client.sendMessage(targetSessionId, request);
+      if (mountedRef.current && currentSessionIdRef.current === targetSessionId) {
+        setFailedDraft(null);
+        setConnError(null);
+      }
+    } catch (err) {
+      if (mountedRef.current && currentSessionIdRef.current === targetSessionId) {
+        const error = err instanceof Error ? err.message : String(err);
+        // A lost response does not mean the server rejected this request.
+        setFailedDraft({ ...request, error });
+        setConnError(error);
+      }
+    } finally {
+      if (mountedRef.current && currentSessionIdRef.current === targetSessionId) {
+        setSending(false);
+      }
+    }
+  };
+
   const handleSend = async (whenBusy: "steer" | "followUp" = "steer") => {
-    const text = inputText.trim();
-    if (!text || sending) return;
+    const content = inputTextRef.current.trim();
+    if (!content || sending || failedDraft) return;
 
     const requestId = `mobile-${session.id}-${Date.now()}-${Math.random()
       .toString(36)
       .slice(2, 7)}`;
-
-    setSending(true);
-    setInputText("");
+    isNearBottomRef.current = true;
+    updateInputText("");
     setBottomTray(null);
-    try {
-      await client.sendMessage(session.id, {
-        requestId,
-        content: text,
-        whenBusy,
-      });
-    } catch (err) {
-      setInputText(text);
-      setConnError(err instanceof Error ? err.message : String(err));
-    } finally {
-      setSending(false);
-    }
+    await submitMessage({ requestId, content, whenBusy });
+  };
+
+  const handleRetryFailedDraft = async () => {
+    if (!failedDraft || sending) return;
+    const { error, ...request } = failedDraft;
+    await submitMessage(request);
+  };
+
+  const handleRestoreFailedDraft = () => {
+    if (!failedDraft || sending) return;
+    const restored = restoreFailedDraftToInput(
+      inputTextRef.current,
+      failedDraft,
+    );
+    updateInputText(restored.inputText);
+    setFailedDraft(null);
   };
 
   const handleAbort = async () => {
+    const targetSessionId = session.id;
     try {
-      await client.abortSession(session.id);
+      await client.abortSession(targetSessionId);
     } catch (err) {
-      setConnError(err instanceof Error ? err.message : String(err));
+      if (mountedRef.current && currentSessionIdRef.current === targetSessionId) {
+        setConnError(err instanceof Error ? err.message : String(err));
+      }
     }
   };
 
   const handleAbortSubmission = async (submissionId: number) => {
+    const targetSessionId = session.id;
     try {
-      await client.abortSubmission(session.id, submissionId);
+      await client.abortSubmission(targetSessionId, submissionId);
     } catch (err) {
-      setConnError(err instanceof Error ? err.message : String(err));
+      if (mountedRef.current && currentSessionIdRef.current === targetSessionId) {
+        setConnError(err instanceof Error ? err.message : String(err));
+      }
     }
   };
 
@@ -332,10 +422,17 @@ export function SessionDetailScreen({
     thinkingLevel?: ThinkingLevel;
     cwd?: string;
   }) => {
+    const targetSessionId = session.id;
     setControlBusy(true);
     try {
-      const updated = await client.updateSession(session.id, patch);
+      const updated = await client.updateSession(targetSessionId, patch);
       onSessionUpdated?.(updated);
+      if (
+        !mountedRef.current ||
+        currentSessionIdRef.current !== targetSessionId
+      ) {
+        return;
+      }
       setLiveState((prev) => ({
         ...prev,
         cwd: updated.cwd,
@@ -346,46 +443,64 @@ export function SessionDetailScreen({
         setTopSheet(null);
       }
     } catch (err) {
-      setConnError(err instanceof Error ? err.message : String(err));
+      if (mountedRef.current && currentSessionIdRef.current === targetSessionId) {
+        setConnError(err instanceof Error ? err.message : String(err));
+      }
     } finally {
-      setControlBusy(false);
+      if (mountedRef.current && currentSessionIdRef.current === targetSessionId) {
+        setControlBusy(false);
+      }
     }
   };
 
   const handleCompact = async () => {
     if (controlBusy) return;
+    const targetSessionId = session.id;
     setControlBusy(true);
     try {
-      await client.compactSession(session.id, {
+      await client.compactSession(targetSessionId, {
         instructions: compactInstructions.trim() || undefined,
       });
-      setCompactInstructions("");
-      setTopSheet(null);
+      if (mountedRef.current && currentSessionIdRef.current === targetSessionId) {
+        setCompactInstructions("");
+        setTopSheet(null);
+      }
     } catch (err) {
-      setConnError(err instanceof Error ? err.message : String(err));
+      if (mountedRef.current && currentSessionIdRef.current === targetSessionId) {
+        setConnError(err instanceof Error ? err.message : String(err));
+      }
     } finally {
-      setControlBusy(false);
+      if (mountedRef.current && currentSessionIdRef.current === targetSessionId) {
+        setControlBusy(false);
+      }
     }
   };
 
   const handleReset = async () => {
     if (controlBusy) return;
+    const targetSessionId = session.id;
     setControlBusy(true);
     try {
-      await client.resetSession(session.id, {
+      await client.resetSession(targetSessionId, {
         handoff: resetPrompt.trim() || undefined,
       });
-      setResetPrompt("");
-      setTopSheet(null);
+      if (mountedRef.current && currentSessionIdRef.current === targetSessionId) {
+        setResetPrompt("");
+        setTopSheet(null);
+      }
     } catch (err) {
-      setConnError(err instanceof Error ? err.message : String(err));
+      if (mountedRef.current && currentSessionIdRef.current === targetSessionId) {
+        setConnError(err instanceof Error ? err.message : String(err));
+      }
     } finally {
-      setControlBusy(false);
+      if (mountedRef.current && currentSessionIdRef.current === targetSessionId) {
+        setControlBusy(false);
+      }
     }
   };
 
   const handleMentionPath = (mentionToken: string) => {
-    setInputText((prev) => {
+    updateInputText((prev) => {
       const trimmed = prev.trimEnd();
       if (!trimmed) return `${mentionToken} `;
       return `${trimmed} ${mentionToken} `;
@@ -684,16 +799,22 @@ export function SessionDetailScreen({
         </View>
       )}
 
-      {connError && (
+      {(connError || liveState.lastError) && (
         <View style={styles.errorBanner}>
           <Text style={styles.errorBannerText} numberOfLines={2}>
-            {connError}
+            {connError || liveState.lastError}
           </Text>
           <Pressable
-            onPress={() => setStreamGeneration((g) => g + 1)}
+            onPress={() => {
+              setConnError(null);
+              setLiveState((prev) => ({ ...prev, lastError: undefined }));
+              setStreamGeneration((g) => g + 1);
+            }}
             style={styles.reconnectBtn}
           >
-            <Text style={styles.reconnectBtnText}>Reconnect</Text>
+            <Text style={styles.reconnectBtnText}>
+              {connError ? "Reconnect" : "Dismiss"}
+            </Text>
           </Pressable>
         </View>
       )}
@@ -723,9 +844,15 @@ export function SessionDetailScreen({
             ref={scrollRef}
             style={styles.chatScroll}
             contentContainerStyle={styles.chatContent}
-            onContentSizeChange={() =>
-              scrollRef.current?.scrollToEnd({ animated: true })
-            }
+            scrollEventThrottle={16}
+            onScroll={(e) => {
+              const { layoutMeasurement, contentOffset, contentSize } =
+                e.nativeEvent;
+              const distanceFromBottom =
+                contentSize.height -
+                (layoutMeasurement.height + contentOffset.y);
+              isNearBottomRef.current = distanceFromBottom <= 96;
+            }}
           >
             {liveState.items.length === 0 ? (
               <View style={styles.emptyChatBox}>
@@ -993,7 +1120,7 @@ export function SessionDetailScreen({
                   style={{ flexGrow: 0 }}
                   contentContainerStyle={styles.drawerPillsRow}
                 >
-                  {device.models.slice(0, 20).map((m) => {
+                  {device.models.map((m) => {
                     const active =
                       activeModel.provider === m.provider &&
                       activeModel.modelId === m.modelId;
@@ -1052,6 +1179,45 @@ export function SessionDetailScreen({
               </View>
             )}
 
+            {failedDraft && (
+              <View style={styles.failedDraftBox}>
+                <View style={styles.failedDraftTextCol}>
+                  <Text style={styles.failedDraftTitle}>
+                    Delivery unconfirmed:
+                  </Text>
+                  <Text style={styles.failedDraftPreview} numberOfLines={2}>
+                    {failedDraft.content}
+                  </Text>
+                </View>
+                <View style={styles.failedDraftActions}>
+                  <Pressable
+                    style={styles.failedRetryBtn}
+                    onPress={handleRetryFailedDraft}
+                    disabled={sending}
+                    accessibilityLabel="Retry failed message"
+                  >
+                    <Text style={styles.failedRetryBtnText}>↻ Retry</Text>
+                  </Pressable>
+                  <Pressable
+                    style={styles.failedRestoreBtn}
+                    onPress={handleRestoreFailedDraft}
+                    disabled={sending}
+                    accessibilityLabel="Restore failed message for editing"
+                  >
+                    <Text style={styles.failedRestoreBtnText}>Restore</Text>
+                  </Pressable>
+                  <Pressable
+                    style={styles.failedDismissBtn}
+                    onPress={() => setFailedDraft(null)}
+                    disabled={sending}
+                    accessibilityLabel="Dismiss failed message"
+                  >
+                    <Text style={styles.failedDismissBtnText}>✕</Text>
+                  </Pressable>
+                </View>
+              </View>
+            )}
+
             {/* Unified Two-Row Modern Composer Card */}
             <View style={styles.composerCard}>
               <TextInput
@@ -1063,7 +1229,8 @@ export function SessionDetailScreen({
                 }
                 placeholderTextColor="#6b7280"
                 value={inputText}
-                onChangeText={setInputText}
+                accessibilityLabel="Message"
+                onChangeText={updateInputText}
                 multiline
               />
 
@@ -1140,12 +1307,14 @@ export function SessionDetailScreen({
                           <Pressable
                             style={styles.steerPillBtn}
                             onPress={() => handleSend("steer")}
+                            disabled={sending || Boolean(failedDraft)}
                           >
                             <Text style={styles.sendPillText}>⚡ Steer</Text>
                           </Pressable>
                           <Pressable
                             style={styles.queuePillBtn}
                             onPress={() => handleSend("followUp")}
+                            disabled={sending || Boolean(failedDraft)}
                           >
                             <Text style={styles.queuePillText}>+ Queue</Text>
                           </Pressable>
@@ -1162,12 +1331,13 @@ export function SessionDetailScreen({
                     <Pressable
                       style={[
                         styles.sendPillBtn,
-                        !inputText.trim() || sending
+                        !inputText.trim() || sending || failedDraft
                           ? styles.sendPillBtnDisabled
                           : null,
                       ]}
                       onPress={() => handleSend("steer")}
-                      disabled={!inputText.trim() || sending}
+                      disabled={!inputText.trim() || sending || Boolean(failedDraft)}
+                      accessibilityLabel="Send message"
                     >
                       <Text style={styles.sendPillText}>↑ Send</Text>
                     </Pressable>
@@ -1964,5 +2134,71 @@ const styles = StyleSheet.create({
     backgroundColor: "#dc2626",
     alignItems: "center",
     justifyContent: "center",
+  },
+  failedDraftBox: {
+    backgroundColor: "#2a1215",
+    borderWidth: 1,
+    borderColor: "#7f1d1d",
+    borderRadius: 10,
+    paddingHorizontal: 10,
+    paddingVertical: 8,
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+    gap: 8,
+  },
+  failedDraftTextCol: {
+    flex: 1,
+    minWidth: 0,
+    gap: 2,
+  },
+  failedDraftTitle: {
+    color: "#fca5a5",
+    fontSize: 10,
+    fontWeight: "700",
+  },
+  failedDraftPreview: {
+    color: "#fecaca",
+    fontFamily: MONO_FONT,
+    fontSize: 11,
+  },
+  failedDraftActions: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 6,
+    flexShrink: 0,
+  },
+  failedRetryBtn: {
+    backgroundColor: "#b91c1c",
+    paddingHorizontal: 8,
+    paddingVertical: 5,
+    borderRadius: 6,
+  },
+  failedRetryBtnText: {
+    color: "#ffffff",
+    fontSize: 11,
+    fontWeight: "700",
+  },
+  failedRestoreBtn: {
+    backgroundColor: "#1f2937",
+    borderWidth: 1,
+    borderColor: "#374151",
+    paddingHorizontal: 8,
+    paddingVertical: 5,
+    borderRadius: 6,
+  },
+  failedRestoreBtnText: {
+    color: "#e5e7eb",
+    fontSize: 11,
+    fontWeight: "600",
+  },
+  failedDismissBtn: {
+    paddingHorizontal: 5,
+    paddingVertical: 4,
+  },
+  failedDismissBtnText: {
+    color: "#fca5a5",
+    fontSize: 12,
+    fontWeight: "700",
   },
 });

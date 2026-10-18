@@ -54,19 +54,77 @@ function extractTextFromContent(content: unknown): string {
   return "";
 }
 
+function cloneJsonRecord(obj: Record<string, unknown>): Record<string, unknown> {
+  try {
+    return JSON.parse(JSON.stringify(obj)) as Record<string, unknown>;
+  } catch {
+    return { ...obj };
+  }
+}
+
+function appendStringAtPath(
+  root: Record<string, unknown>,
+  path: readonly (string | number)[],
+  delta: string,
+): Record<string, unknown> {
+  const cloned = cloneJsonRecord(root);
+  if (path.length === 0) return cloned;
+
+  let cursor: Record<string, unknown> | unknown[] = cloned;
+  for (let i = 0; i < path.length - 1; i++) {
+    const key = path[i];
+    const nextKey = path[i + 1];
+    if (Array.isArray(cursor)) {
+      const idx = typeof key === "number" ? key : Number(key);
+      const existing = cursor[idx];
+      if (!existing || typeof existing !== "object") {
+        cursor[idx] = typeof nextKey === "number" ? [] : {};
+      }
+      cursor = cursor[idx] as Record<string, unknown> | unknown[];
+    } else {
+      const strKey = String(key);
+      const existing = cursor[strKey];
+      if (!existing || typeof existing !== "object") {
+        cursor[strKey] = typeof nextKey === "number" ? [] : {};
+      }
+      cursor = cursor[strKey] as Record<string, unknown> | unknown[];
+    }
+  }
+
+  const lastKey = path[path.length - 1];
+  if (Array.isArray(cursor)) {
+    const idx = typeof lastKey === "number" ? lastKey : Number(lastKey);
+    const prev = typeof cursor[idx] === "string" ? (cursor[idx] as string) : "";
+    cursor[idx] = prev + delta;
+  } else {
+    const strKey = String(lastKey);
+    const prev =
+      typeof cursor[strKey] === "string" ? (cursor[strKey] as string) : "";
+    cursor[strKey] = prev + delta;
+  }
+
+  return cloned;
+}
+
 function parseAssistantMessage(
   msg: Record<string, unknown>,
   id: string,
   entryId?: number,
 ): AssistantTranscriptItem {
   const content = Array.isArray(msg.content) ? msg.content : [];
+  const blocks: Record<string, unknown>[] = [];
   const thinkingParts: string[] = [];
   const textParts: string[] = [];
   const toolCalls: ToolCallItem[] = [];
 
-  for (const block of content) {
-    if (!block || typeof block !== "object") continue;
+  for (let i = 0; i < content.length; i++) {
+    const block = content[i];
+    if (!block || typeof block !== "object") {
+      blocks.push({ type: "empty" });
+      continue;
+    }
     const b = block as Record<string, unknown>;
+    blocks.push(b);
     if (b.type === "thinking" && typeof b.thinking === "string") {
       thinkingParts.push(b.thinking);
     } else if (b.type === "text" && typeof b.text === "string") {
@@ -110,6 +168,7 @@ function parseAssistantMessage(
     status,
     errorMessage,
     toolCalls,
+    blocks,
     timestamp,
   };
 }
@@ -340,8 +399,15 @@ export function buildTranscriptItems(
         if (live) {
           tc.status = live.status;
           tc.output = live.output;
+          tc.isError = live.isError;
           tc.details = live.details;
           tc.diagnostics = live.diagnostics;
+          if (
+            Object.keys(tc.args).length === 0 &&
+            Object.keys(live.args).length > 0
+          ) {
+            tc.args = live.args;
+          }
         }
         toolCallIndex.set(tc.callId, tc);
       }
@@ -417,7 +483,13 @@ export function buildTranscriptItems(
   if (inFlightAssistant) {
     const mergedToolCalls = inFlightAssistant.toolCalls.map((tc) => {
       const live = liveTools[tc.callId];
-      return live ? { ...tc, ...live } : tc;
+      if (!live) return tc;
+      return {
+        ...tc,
+        ...live,
+        args:
+          Object.keys(tc.args).length > 0 ? tc.args : live.args,
+      };
     });
     items.push({
       ...inFlightAssistant,
@@ -433,11 +505,13 @@ export function applySnapshot(snapshot: RawSnapshotEvent): SessionLiveState {
   const liveTools: Record<string, ToolCallItem> = {};
 
   for (const slot of snapshot.tools ?? []) {
+    const isFaultedOrOrphanedDone =
+      slot.status === "done" && slot.entry === undefined;
     liveTools[slot.callId] = {
       callId: slot.callId,
       toolName: slot.name,
       args: {},
-      status: slot.status,
+      status: isFaultedOrOrphanedDone ? "interrupted" : slot.status,
       output: slot.output ?? "",
       details: slot.details,
       diagnostics: slot.diagnostics ? [...slot.diagnostics] : undefined,
@@ -466,6 +540,10 @@ export function applySnapshot(snapshot: RawSnapshotEvent): SessionLiveState {
       }
     : undefined;
 
+  const lastError = snapshot.compactionFailure?.error
+    ? `Compaction failed: ${snapshot.compactionFailure.error}`
+    : undefined;
+
   const contextTokens = estimateActiveContextTokens(entries, inFlightAssistant);
 
   return {
@@ -481,73 +559,212 @@ export function applySnapshot(snapshot: RawSnapshotEvent): SessionLiveState {
     thinkingLevel: snapshot.agent?.thinkingLevel,
     cwd: snapshot.agent?.cwd,
     usage: parseUsage(snapshot.usage, contextTokens),
+    lastError,
   };
+}
+
+function reconstructBlocksFromItem(
+  item: AssistantTranscriptItem | null,
+): Record<string, unknown>[] {
+  if (!item) return [];
+  if (item.blocks) {
+    return item.blocks.map((b) => cloneJsonRecord(b));
+  }
+  const blocks: Record<string, unknown>[] = [];
+  if (item.thinking) {
+    blocks.push({ type: "thinking", thinking: item.thinking });
+  }
+  if (item.text) {
+    blocks.push({ type: "text", text: item.text });
+  }
+  for (const tc of item.toolCalls) {
+    blocks.push({
+      type: "toolCall",
+      id: tc.callId,
+      name: tc.toolName,
+      arguments: cloneJsonRecord(tc.args),
+    });
+  }
+  return blocks;
+}
+
+function ensureBlockSlot(
+  blocks: Record<string, unknown>[],
+  index: number,
+): void {
+  while (blocks.length <= index) {
+    blocks.push({ type: "empty" });
+  }
 }
 
 function applyMessageChanges(
   current: AssistantTranscriptItem | null,
   changes: ReadonlyArray<Record<string, unknown>>,
 ): AssistantTranscriptItem {
-  const base: AssistantTranscriptItem = current
-    ? {
-        ...current,
-        toolCalls: [...current.toolCalls],
-      }
-    : {
-        id: "in-flight",
-        kind: "assistant",
-        thinking: "",
-        text: "",
-        status: "streaming",
-        toolCalls: [],
-      };
+  const id = current?.id ?? "in-flight";
+  const entryId = current?.entryId;
+  let blocks = reconstructBlocksFromItem(current);
 
   for (const change of changes) {
     const type = change.type;
     if (type === "message" && change.message && typeof change.message === "object") {
-      return {
-        ...parseAssistantMessage(change.message as Record<string, unknown>, "in-flight"),
-        status: "streaming",
-      };
+      const parsed = parseAssistantMessage(
+        change.message as Record<string, unknown>,
+        id,
+        entryId,
+      );
+      blocks = reconstructBlocksFromItem(parsed);
+      continue;
     }
-    if (type === "thinking_delta" && typeof change.delta === "string") {
-      base.thinking += change.delta;
-    } else if (type === "text_delta" && typeof change.delta === "string") {
-      base.text += change.delta;
-    } else if (
-      (type === "text_start" || type === "thinking_start" || type === "toolcall_start" || type === "block") &&
+
+    const idx =
+      typeof change.contentIndex === "number" && change.contentIndex >= 0
+        ? change.contentIndex
+        : undefined;
+
+    if (
+      (type === "text_start" ||
+        type === "thinking_start" ||
+        type === "toolcall_start" ||
+        type === "block") &&
       change.block &&
       typeof change.block === "object"
     ) {
-      const b = change.block as Record<string, unknown>;
-      if (b.type === "toolCall") {
-        const callId = typeof b.id === "string" ? b.id : `call-${base.toolCalls.length}`;
-        const toolName = typeof b.name === "string" ? b.name : "tool";
-        const args =
-          b.arguments && typeof b.arguments === "object"
-            ? (b.arguments as Record<string, unknown>)
-            : {};
-        const existingIdx = base.toolCalls.findIndex((t) => t.callId === callId);
-        if (existingIdx >= 0) {
-          base.toolCalls[existingIdx] = {
-            ...base.toolCalls[existingIdx],
-            toolName,
-            args,
+      const clonedBlock = cloneJsonRecord(
+        change.block as Record<string, unknown>,
+      );
+      if (idx !== undefined) {
+        ensureBlockSlot(blocks, idx);
+        blocks[idx] = clonedBlock;
+      } else {
+        blocks.push(clonedBlock);
+      }
+    } else if (type === "text_delta" && typeof change.delta === "string") {
+      if (idx !== undefined) {
+        ensureBlockSlot(blocks, idx);
+        const existing = blocks[idx];
+        const prevText =
+          existing?.type === "text" && typeof existing.text === "string"
+            ? existing.text
+            : "";
+        blocks[idx] = {
+          ...(existing?.type === "text" ? existing : { type: "text" }),
+          type: "text",
+          text: prevText + change.delta,
+        };
+      } else {
+        let lastTextIdx = -1;
+        for (let i = blocks.length - 1; i >= 0; i--) {
+          if (blocks[i]?.type === "text") {
+            lastTextIdx = i;
+            break;
+          }
+        }
+        if (lastTextIdx >= 0) {
+          const prev =
+            typeof blocks[lastTextIdx].text === "string"
+              ? (blocks[lastTextIdx].text as string)
+              : "";
+          blocks[lastTextIdx] = {
+            ...blocks[lastTextIdx],
+            text: prev + change.delta,
           };
         } else {
-          base.toolCalls.push({
-            callId,
-            toolName,
-            args,
-            status: "pending",
-            output: "",
-          });
+          blocks.push({ type: "text", text: change.delta });
         }
       }
+    } else if (type === "thinking_delta" && typeof change.delta === "string") {
+      if (idx !== undefined) {
+        ensureBlockSlot(blocks, idx);
+        const existing = blocks[idx];
+        const prevThinking =
+          existing?.type === "thinking" && typeof existing.thinking === "string"
+            ? existing.thinking
+            : "";
+        blocks[idx] = {
+          ...(existing?.type === "thinking" ? existing : { type: "thinking" }),
+          type: "thinking",
+          thinking: prevThinking + change.delta,
+        };
+      } else {
+        let lastThinkingIdx = -1;
+        for (let i = blocks.length - 1; i >= 0; i--) {
+          if (blocks[i]?.type === "thinking") {
+            lastThinkingIdx = i;
+            break;
+          }
+        }
+        if (lastThinkingIdx >= 0) {
+          const prev =
+            typeof blocks[lastThinkingIdx].thinking === "string"
+              ? (blocks[lastThinkingIdx].thinking as string)
+              : "";
+          blocks[lastThinkingIdx] = {
+            ...blocks[lastThinkingIdx],
+            thinking: prev + change.delta,
+          };
+        } else {
+          blocks.push({ type: "thinking", thinking: change.delta });
+        }
+      }
+    } else if (type === "toolcall_delta" && typeof change.delta === "string") {
+      const pathArr = Array.isArray(change.path)
+        ? (change.path as ReadonlyArray<string | number>)
+        : [];
+      let targetIdx = idx;
+      if (targetIdx === undefined) {
+        let found = -1;
+        for (let i = blocks.length - 1; i >= 0; i--) {
+          if (blocks[i]?.type === "toolCall") {
+            found = i;
+            break;
+          }
+        }
+        targetIdx = found >= 0 ? found : blocks.length;
+      }
+      ensureBlockSlot(blocks, targetIdx);
+      const existing = blocks[targetIdx];
+      const baseCall: Record<string, unknown> =
+        existing?.type === "toolCall"
+          ? cloneJsonRecord(existing)
+          : {
+              type: "toolCall",
+              id: `call-${targetIdx}`,
+              name: "tool",
+              arguments: {},
+            };
+      const baseArgs =
+        baseCall.arguments && typeof baseCall.arguments === "object"
+          ? (baseCall.arguments as Record<string, unknown>)
+          : {};
+      baseCall.arguments = appendStringAtPath(baseArgs, pathArr, change.delta);
+      blocks[targetIdx] = baseCall;
     }
   }
 
-  return base;
+  return {
+    ...parseAssistantMessage({ content: blocks }, id, entryId),
+    status: "streaming",
+    timestamp: current?.timestamp,
+  };
+}
+
+function hasToolResultEntry(
+  entries: readonly RawEntryRecord[],
+  callId: string,
+): boolean {
+  return entries.some((entry) => {
+    const firstMsg =
+      Array.isArray(entry.model) && entry.model.length > 0
+        ? entry.model[0]
+        : undefined;
+    return (
+      (entry.kind === "pi.tool_result" ||
+        entry.kind === "pi.tool-result" ||
+        firstMsg?.role === "toolResult") &&
+      firstMsg?.toolCallId === callId
+    );
+  });
 }
 
 export function applyAgentEvent(
@@ -578,12 +795,27 @@ export function applyAgentEvent(
       lastError = undefined;
       break;
 
-    case "run_end":
+    case "run_end": {
       busy = false;
       inFlightAssistant = null;
-      liveTools = {};
       retry = undefined;
+      // Preserve unfinished/interrupted tool outputs that never received a result entry
+      const nextLive: Record<string, ToolCallItem> = {};
+      for (const [callId, tool] of Object.entries(liveTools)) {
+        if (hasToolResultEntry(entries, callId)) {
+          continue;
+        }
+        nextLive[callId] = {
+          ...tool,
+          status:
+            tool.status === "running" || tool.status === "pending"
+              ? "interrupted"
+              : tool.status,
+        };
+      }
+      liveTools = nextLive;
       break;
+    }
 
     case "message_start": {
       const role = event.message?.role;
@@ -603,30 +835,7 @@ export function applyAgentEvent(
       break;
     }
 
-    case "message_end": {
-      if (
-        typeof event.entry.head === "number" ||
-        event.entry.kind === "pi.compaction" ||
-        event.entry.kind === "pi.reset"
-      ) {
-        const target =
-          typeof event.entry.head === "number"
-            ? event.entry.head
-            : event.entry.id;
-        let kept = entries.findIndex(
-          (candidate) => candidate.head === undefined && candidate.id >= target,
-        );
-        if (kept < 0) kept = entries.length;
-        entries = [event.entry, ...entries.slice(kept)];
-      } else if (!entries.some((e) => e.id === event.entry.id)) {
-        entries = [...entries, event.entry];
-      }
-      if (event.entry.kind === "pi.assistant") {
-        inFlightAssistant = null;
-      }
-      break;
-    }
-
+    case "message_end":
     case "entry_appended": {
       if (
         typeof event.entry.head === "number" ||
@@ -642,8 +851,14 @@ export function applyAgentEvent(
         );
         if (kept < 0) kept = entries.length;
         entries = [event.entry, ...entries.slice(kept)];
+        if (event.entry.kind === "pi.compaction" || event.entry.kind === "pi.reset") {
+          lastError = undefined;
+        }
       } else if (!entries.some((e) => e.id === event.entry.id)) {
         entries = [...entries, event.entry];
+      }
+      if (event.type === "message_end" && event.entry.kind === "pi.assistant") {
+        inFlightAssistant = null;
       }
       break;
     }
@@ -700,12 +915,40 @@ export function applyAgentEvent(
     }
 
     case "tool_execution_end": {
-      if (event.entry && !entries.some((e) => e.id === event.entry!.id)) {
-        entries = [...entries, event.entry];
+      if (event.entry) {
+        if (!entries.some((e) => e.id === event.entry!.id)) {
+          entries = [...entries, event.entry];
+        }
+        const nextLive = { ...liveTools };
+        delete nextLive[event.toolCallId];
+        liveTools = nextLive;
+      } else {
+        // Tool ended without a result entry (interrupted, faulted, orphaned, or nested)
+        const prev = liveTools[event.toolCallId];
+        const terminalStatus: ToolCallItem["status"] = event.result
+          ? event.result.isError
+            ? "error"
+            : "done"
+          : "interrupted";
+        liveTools = {
+          ...liveTools,
+          [event.toolCallId]: {
+            callId: event.toolCallId,
+            toolName: event.toolName || prev?.toolName || "tool",
+            args: prev?.args ?? {},
+            status: terminalStatus,
+            isError: event.result?.isError ?? prev?.isError,
+            output: prev?.output ?? "",
+            details:
+              event.result?.details !== undefined
+                ? event.result.details
+                : prev?.details,
+            diagnostics: event.result?.diagnostics
+              ? [...event.result.diagnostics]
+              : prev?.diagnostics,
+          },
+        };
       }
-      const nextLive = { ...liveTools };
-      delete nextLive[event.toolCallId];
-      liveTools = nextLive;
       break;
     }
 
@@ -737,10 +980,14 @@ export function applyAgentEvent(
 
     case "compaction_start":
       compacting = true;
+      lastError = undefined;
       break;
 
     case "compaction_end":
       compacting = false;
+      if (event.error) {
+        lastError = `Compaction failed: ${event.error}`;
+      }
       break;
 
     case "task_failed":

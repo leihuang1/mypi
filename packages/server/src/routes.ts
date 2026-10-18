@@ -75,37 +75,53 @@ function checkBearerAuth(
 export function createRequestHandler(options: {
   manager: HarnessManager;
   token: string;
+  activeResponses?: Set<ServerResponse>;
 }) {
-  const { manager, token } = options;
+  const { manager, token, activeResponses } = options;
 
   return async (req: IncomingMessage, res: ServerResponse): Promise<void> => {
-    setCorsHeaders(res);
-
-    if (req.method === "OPTIONS") {
-      res.statusCode = 204;
-      res.end();
-      return;
-    }
-
-    const url = new URL(req.url || "/", `http://${req.headers.host || "localhost"}`);
-    const pathname = url.pathname;
-
-    if (req.method === "GET" && pathname === "/healthz") {
-      sendJson(res, 200, { ok: true, timestamp: Date.now() });
-      return;
-    }
-
-    if (!pathname.startsWith("/v1/")) {
-      sendError(res, 404, "not_found", `Route not found: ${pathname}`);
-      return;
-    }
-
-    if (!checkBearerAuth(req, url, token)) {
-      sendError(res, 401, "unauthorized", "Invalid or missing bearer token");
-      return;
-    }
-
     try {
+      setCorsHeaders(res);
+
+      if (req.method === "OPTIONS") {
+        res.statusCode = 204;
+        res.end();
+        return;
+      }
+
+      let url: URL;
+      try {
+        const rawHost =
+          typeof req.headers.host === "string" && req.headers.host.trim()
+            ? req.headers.host.trim()
+            : "localhost";
+        url = new URL(req.url || "/", `http://${rawHost}`);
+      } catch {
+        sendError(res, 400, "bad_request", "Malformed request URL or Host header");
+        return;
+      }
+
+      const pathname = url.pathname;
+
+      if (manager.isClosing()) {
+        sendError(res, 503, "closing", "Server is shutting down");
+        return;
+      }
+
+      if (req.method === "GET" && pathname === "/healthz") {
+        sendJson(res, 200, { ok: true, timestamp: Date.now() });
+        return;
+      }
+
+      if (!pathname.startsWith("/v1/")) {
+        sendError(res, 404, "not_found", `Route not found: ${pathname}`);
+        return;
+      }
+
+      if (!checkBearerAuth(req, url, token)) {
+        sendError(res, 401, "unauthorized", "Invalid or missing bearer token");
+        return;
+      }
       // GET /v1/device
       if (req.method === "GET" && pathname === "/v1/device") {
         sendJson(res, 200, manager.getDeviceInfo());
@@ -259,41 +275,76 @@ export function createRequestHandler(options: {
 
         // GET /v1/sessions/:id/events (SSE stream)
         if (req.method === "GET" && subRoute === "events") {
-          res.writeHead(200, {
-            "Content-Type": "text/event-stream; charset=utf-8",
-            "Cache-Control": "no-cache, no-transform",
-            Connection: "keep-alive",
-            "Access-Control-Allow-Origin": "*",
-            "X-Accel-Buffering": "no",
-          });
+          let closed = req.destroyed || res.writableEnded;
+          let heartbeat: ReturnType<typeof setInterval> | null = null;
+          let unsubscribe: (() => Promise<void>) | null = null;
 
-          const writeFrame = (frame: SseFrame) => {
-            if (!res.writableEnded) {
-              res.write(`data: ${JSON.stringify(frame)}\n\n`);
+          const cleanup = () => {
+            if (closed && !heartbeat && !unsubscribe) return;
+            closed = true;
+            activeResponses?.delete(res);
+            if (heartbeat) {
+              clearInterval(heartbeat);
+              heartbeat = null;
+            }
+            if (unsubscribe) {
+              const fn = unsubscribe;
+              unsubscribe = null;
+              void fn();
             }
           };
 
-          const unsubscribe = await manager.subscribeSession(sessionId, writeFrame);
-          const heartbeat = setInterval(() => {
+          req.once("close", cleanup);
+          res.once("close", cleanup);
+
+          const writeFrame = (frame: SseFrame) => {
+            if (closed || res.writableEnded) return;
+            if (!res.headersSent) {
+              res.writeHead(200, {
+                "Content-Type": "text/event-stream; charset=utf-8",
+                "Cache-Control": "no-cache, no-transform",
+                Connection: "keep-alive",
+                "Access-Control-Allow-Origin": "*",
+                "X-Accel-Buffering": "no",
+              });
+            }
+            res.write(`data: ${JSON.stringify(frame)}\n\n`);
+          };
+
+          const unsub = await manager.subscribeSession(sessionId, writeFrame);
+          if (closed || req.destroyed || res.writableEnded) {
+            await unsub();
+            return;
+          }
+
+          unsubscribe = unsub;
+          activeResponses?.add(res);
+          heartbeat = setInterval(() => {
             writeFrame({ type: "heartbeat", timestamp: Date.now() });
           }, 15_000);
-
-          req.on("close", () => {
-            clearInterval(heartbeat);
-            void unsubscribe();
-          });
           return;
         }
       }
 
       sendError(res, 404, "not_found", `Route not found: ${pathname}`);
     } catch (err) {
+      if (res.headersSent) {
+        if (!res.writableEnded) {
+          res.end();
+        }
+        return;
+      }
       const message = err instanceof Error ? err.message : String(err);
-      const status = message.toLowerCase().includes("not found") ? 404 : 500;
+      const lower = message.toLowerCase();
+      const status = lower.includes("not found")
+        ? 404
+        : lower.includes("shutting down")
+          ? 503
+          : 500;
       sendError(
         res,
         status,
-        status === 404 ? "not_found" : "internal",
+        status === 404 ? "not_found" : status === 503 ? "closing" : "internal",
         message,
       );
     }
