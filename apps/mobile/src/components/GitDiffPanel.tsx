@@ -1,390 +1,156 @@
-import React, { useEffect, useState } from "react";
+import React, { useRef, useState } from "react";
 import {
-  ActivityIndicator,
+  FlatList,
+  Modal,
   Platform,
   Pressable,
-  ScrollView,
+  SafeAreaView,
   StyleSheet,
   Text,
   View,
 } from "react-native";
-import type { GitFileStatus, GitStatusResponse, MyPiClient } from "@mypi/shared";
+import type { GitFileStatus, GitStatusResponse } from "@mypi/shared";
 
-const MONO_FONT = Platform.select({
-  ios: "Menlo",
-  android: "monospace",
-  default: "monospace",
-});
+const MONO_FONT = Platform.OS === "ios" ? "Menlo" : "monospace";
 
-function DiffBlock({ diff }: { diff: string }) {
-  if (!diff.trim()) {
-    return (
-      <Text style={styles.emptyDiffText}>
-        Binary or empty file diff.
-      </Text>
-    );
+export function GitDiffPanel({ info, stale, visible, onClose, onRefresh }: {
+  info?: GitStatusResponse;
+  stale: boolean;
+  visible: boolean;
+  onClose: () => void;
+  onRefresh: () => void;
+}) {
+  const [selected, setSelected] = useState<GitFileStatus | null>(null);
+  const [expanded, setExpanded] = useState(false);
+  const [diffVersion, setDiffVersion] = useState(0);
+  const listRef = useRef<FlatList<GitFileStatus>>(null);
+  const listOffset = useRef(0);
+  const files = info?.files ?? [];
+  const latest = selected && files.find((file) => file.path === selected.path);
+  const changed = selected && (latest?.diff ?? "") !== selected.diff;
+  const close = () => {
+    setSelected(null);
+    setExpanded(false);
+    onClose();
+  };
+  const back = () => setSelected(null);
+  const names = new Map<string, number>();
+  for (const file of files) {
+    const name = file.path.split("/").pop()!;
+    names.set(name, (names.get(name) ?? 0) + 1);
   }
 
-  const lines = diff.split(/\r?\n/);
   return (
-    <ScrollView horizontal showsHorizontalScrollIndicator={true}>
-      <View style={styles.diffLinesContainer}>
-        {lines.map((line, idx) => {
-          let lineStyle = styles.diffLineContext;
-          let textStyle = styles.diffTextContext;
-          if (line.startsWith("+++") || line.startsWith("---")) {
-            lineStyle = styles.diffLineHeader;
-            textStyle = styles.diffTextHeader;
-          } else if (line.startsWith("@@")) {
-            lineStyle = styles.diffLineHunk;
-            textStyle = styles.diffTextHunk;
-          } else if (line.startsWith("+")) {
-            lineStyle = styles.diffLineAdd;
-            textStyle = styles.diffTextAdd;
-          } else if (line.startsWith("-")) {
-            lineStyle = styles.diffLineDel;
-            textStyle = styles.diffTextDel;
-          }
-          return (
-            <View key={idx} style={[styles.diffLine, lineStyle]}>
-              <Text style={[styles.diffText, textStyle]} selectable>
-                {line || " "}
+    <Modal visible={visible} transparent animationType="slide" onRequestClose={selected ? back : close}>
+      <View style={styles.overlay}>
+        <Pressable style={styles.backdrop} onPress={close} accessibilityLabel="关闭改动面板" />
+        <SafeAreaView style={[styles.sheet, { height: expanded ? "94%" : "72%" }]}>
+          <View style={styles.handle} />
+          <View style={styles.header}>
+            {selected && <Pressable onPress={back} style={styles.button} accessibilityLabel="返回文件列表"><Text style={styles.link}>‹ 列表</Text></Pressable>}
+            <View style={styles.titleBlock}>
+              <Text style={styles.eyebrow}>工作区改动</Text>
+              <Text style={styles.title} numberOfLines={1} ellipsizeMode="middle">
+                {selected ? selected.path : `${files.length} 个文件`}
               </Text>
             </View>
-          );
-        })}
-      </View>
-    </ScrollView>
-  );
-}
-
-function FileDiffCard({ file }: { file: GitFileStatus }) {
-  const [expanded, setExpanded] = useState(true);
-
-  const badgeBg =
-    file.status === "A" || file.status === "?"
-      ? "#065f46"
-      : file.status === "D"
-        ? "#7f1d1d"
-        : "#1e3a8a";
-
-  return (
-    <View style={styles.fileCard}>
-      <Pressable
-        style={styles.fileHeader}
-        onPress={() => setExpanded((prev) => !prev)}
-      >
-        <View style={[styles.statusBadge, { backgroundColor: badgeBg }]}>
-          <Text style={styles.statusBadgeText}>{file.status}</Text>
-        </View>
-        <Text style={styles.filePath} numberOfLines={1}>
-          {file.path}
-        </Text>
-        <View style={styles.statPills}>
-          {file.additions > 0 && (
-            <Text style={styles.addStat}>+{file.additions}</Text>
+            <Pressable onPress={() => setExpanded((prev) => !prev)} style={styles.button} accessibilityLabel={expanded ? "收起阅读区域" : "展开阅读区域"}>
+              <Text style={styles.link}>{expanded ? "收起" : "展开"}</Text>
+            </Pressable>
+            <Pressable onPress={close} style={styles.button} accessibilityLabel="关闭改动面板"><Text style={styles.close}>×</Text></Pressable>
+          </View>
+          <View style={styles.scopeRow}>
+            <Text style={styles.caption}>相对 HEAD · 含暂存、未暂存及新增文本</Text>
+            <Pressable onPress={onRefresh} hitSlop={8} accessibilityLabel="刷新工作区改动">
+              <Text style={styles.link}>{stale ? "暂未更新 · 重试" : "↻"}</Text>
+            </Pressable>
+          </View>
+          {changed && (
+            <Pressable style={styles.updateBanner} onPress={() => {
+              setSelected(latest ?? { ...selected, diff: "", additions: 0, deletions: 0 });
+              setDiffVersion((v) => v + 1);
+            }} accessibilityRole="button">
+              <Text style={styles.link}>有新改动 · 更新</Text>
+              <Text style={styles.caption}>当前阅读内容保持不变</Text>
+            </Pressable>
           )}
-          {file.deletions > 0 && (
-            <Text style={styles.delStat}>-{file.deletions}</Text>
-          )}
-          <Text style={styles.chevron}>{expanded ? "▾" : "▸"}</Text>
-        </View>
-      </Pressable>
-      {expanded && (
-        <View style={styles.fileDiffBody}>
-          <DiffBlock diff={file.diff} />
-        </View>
-      )}
-    </View>
-  );
-}
-
-export function GitDiffPanel({
-  client,
-  sessionId,
-}: {
-  client: MyPiClient;
-  sessionId: string;
-}) {
-  const [gitInfo, setGitInfo] = useState<GitStatusResponse | null>(null);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
-
-  const loadGitStatus = async () => {
-    setLoading(true);
-    setError(null);
-    try {
-      const res = await client.getGitStatus(sessionId);
-      setGitInfo(res);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  useEffect(() => {
-    void loadGitStatus();
-  }, [sessionId]);
-
-  if (loading && !gitInfo) {
-    return (
-      <View style={styles.centered}>
-        <ActivityIndicator color="#60a5fa" />
-        <Text style={styles.hintText}>Inspecting workspace git status...</Text>
+          <View style={[styles.body, selected ? styles.hidden : null]}>
+            <FlatList
+              ref={listRef}
+              data={files}
+              keyExtractor={(file) => file.path}
+              onScroll={(event) => { listOffset.current = event.nativeEvent.contentOffset.y; }}
+              scrollEventThrottle={32}
+              onLayout={() => listRef.current?.scrollToOffset({ offset: listOffset.current, animated: false })}
+              contentContainerStyle={styles.listContent}
+              ListEmptyComponent={<Text style={styles.empty}>暂无可展示的文本改动</Text>}
+              renderItem={({ item: file }) => {
+                const name = file.path.split("/").pop()!;
+                const directory = file.path.slice(0, -name.length).replace(/\/$/, "");
+                const badge = file.status === "A" || file.status === "?" ? "新增" : file.status === "D" ? "删除" : null;
+                return (
+                  <Pressable style={styles.fileRow} onPress={() => { setSelected(file); setExpanded(true); }} accessibilityRole="button">
+                    <View style={styles.titleBlock}>
+                      <Text style={styles.fileName} numberOfLines={1}>{name}</Text>
+                      {(names.get(name) ?? 0) > 1 && <Text style={styles.caption} numberOfLines={1} ellipsizeMode="middle">{directory || "."}</Text>}
+                    </View>
+                    {badge && <Text style={styles.badge}>{badge}</Text>}
+                    <Text style={styles.add}>+{file.additions}</Text>
+                    <Text style={styles.del}>−{file.deletions}</Text>
+                    <Text style={styles.caption}>›</Text>
+                  </Pressable>
+                );
+              }}
+            />
+          </View>
+          {selected && <FlatList
+            key={`${selected.path}:${diffVersion}`}
+            style={styles.body}
+            data={selected.diff ? selected.diff.split(/\r?\n/) : []}
+            keyExtractor={(_line, index) => String(index)}
+            contentContainerStyle={styles.diffContent}
+            ListEmptyComponent={<Text style={styles.empty}>该文件已无可展示的文本改动</Text>}
+            renderItem={({ item: line }) => {
+              const header = line.startsWith("+++") || line.startsWith("---") || line.startsWith("diff ") || line.startsWith("index ");
+              const style = header ? styles.diffHeader : line.startsWith("@@") ? styles.hunk : line.startsWith("+") ? styles.addLine : line.startsWith("-") ? styles.delLine : styles.context;
+              return <Text selectable style={[styles.diffLine, style]}>{line || " "}</Text>;
+            }}
+          />}
+        </SafeAreaView>
       </View>
-    );
-  }
-
-  if (error) {
-    return (
-      <View style={styles.centered}>
-        <Text style={styles.errorText}>{error}</Text>
-        <Pressable style={styles.refreshBtn} onPress={loadGitStatus}>
-          <Text style={styles.refreshBtnText}>Retry</Text>
-        </Pressable>
-      </View>
-    );
-  }
-
-  if (!gitInfo || !gitInfo.isGitRepo) {
-    return (
-      <View style={styles.centered}>
-        <Text style={styles.hintText}>
-          Current working directory is not a Git repository.
-        </Text>
-        <Pressable style={styles.refreshBtn} onPress={loadGitStatus}>
-          <Text style={styles.refreshBtnText}>Refresh</Text>
-        </Pressable>
-      </View>
-    );
-  }
-
-  return (
-    <ScrollView style={styles.container} contentContainerStyle={styles.content}>
-      <View style={styles.summaryBar}>
-        <View style={styles.branchRow}>
-          <Text style={styles.branchBadge}>⎇ {gitInfo.branch || "HEAD"}</Text>
-          <Text style={styles.summaryStats}>
-            {gitInfo.files.length} files changed (
-            <Text style={styles.addStat}>+{gitInfo.summary.totalAdditions}</Text>{" "}
-            / <Text style={styles.delStat}>-{gitInfo.summary.totalDeletions}</Text>)
-          </Text>
-        </View>
-        <Pressable style={styles.refreshSmallBtn} onPress={loadGitStatus}>
-          <Text style={styles.refreshSmallText}>
-            {loading ? "..." : "↻ Refresh"}
-          </Text>
-        </Pressable>
-      </View>
-
-      {gitInfo.clean ? (
-        <View style={styles.cleanBox}>
-          <Text style={styles.cleanTitle}>Working tree clean</Text>
-          <Text style={styles.hintText}>
-            No uncommitted modifications or untracked files in this repository.
-          </Text>
-        </View>
-      ) : (
-        gitInfo.files.map((file) => (
-          <FileDiffCard key={file.path} file={file} />
-        ))
-      )}
-    </ScrollView>
+    </Modal>
   );
 }
 
 const styles = StyleSheet.create({
-  container: {
-    flex: 1,
-    backgroundColor: "#0b0e14",
-  },
-  content: {
-    padding: 12,
-    gap: 12,
-    paddingBottom: 32,
-  },
-  centered: {
-    flex: 1,
-    justifyContent: "center",
-    alignItems: "center",
-    padding: 24,
-    gap: 12,
-    backgroundColor: "#0b0e14",
-  },
-  hintText: {
-    color: "#9ca3af",
-    fontSize: 13,
-    textAlign: "center",
-  },
-  errorText: {
-    color: "#f87171",
-    fontSize: 13,
-    textAlign: "center",
-  },
-  refreshBtn: {
-    backgroundColor: "#1f2937",
-    paddingHorizontal: 16,
-    paddingVertical: 8,
-    borderRadius: 6,
-    borderWidth: 1,
-    borderColor: "#374151",
-  },
-  refreshBtnText: {
-    color: "#e5e7eb",
-    fontSize: 13,
-    fontWeight: "600",
-  },
-  summaryBar: {
-    flexDirection: "row",
-    alignItems: "center",
-    justifyContent: "space-between",
-    backgroundColor: "#141821",
-    padding: 12,
-    borderRadius: 8,
-    borderWidth: 1,
-    borderColor: "#262d3d",
-  },
-  branchRow: {
-    flex: 1,
-    gap: 4,
-  },
-  branchBadge: {
-    color: "#93c5fd",
-    fontFamily: MONO_FONT,
-    fontSize: 13,
-    fontWeight: "700",
-  },
-  summaryStats: {
-    color: "#9ca3af",
-    fontSize: 12,
-  },
-  refreshSmallBtn: {
-    backgroundColor: "#1e293b",
-    paddingHorizontal: 10,
-    paddingVertical: 6,
-    borderRadius: 6,
-  },
-  refreshSmallText: {
-    color: "#cbd5e1",
-    fontSize: 12,
-    fontWeight: "600",
-  },
-  cleanBox: {
-    padding: 32,
-    alignItems: "center",
-    gap: 6,
-  },
-  cleanTitle: {
-    color: "#34d399",
-    fontSize: 15,
-    fontWeight: "700",
-  },
-  fileCard: {
-    backgroundColor: "#141821",
-    borderRadius: 8,
-    borderWidth: 1,
-    borderColor: "#262d3d",
-    overflow: "hidden",
-  },
-  fileHeader: {
-    flexDirection: "row",
-    alignItems: "center",
-    paddingHorizontal: 10,
-    paddingVertical: 10,
-    gap: 8,
-  },
-  statusBadge: {
-    paddingHorizontal: 6,
-    paddingVertical: 2,
-    borderRadius: 4,
-  },
-  statusBadgeText: {
-    color: "#f9fafb",
-    fontFamily: MONO_FONT,
-    fontSize: 11,
-    fontWeight: "700",
-  },
-  filePath: {
-    flex: 1,
-    color: "#e5e7eb",
-    fontFamily: MONO_FONT,
-    fontSize: 12,
-    fontWeight: "600",
-  },
-  statPills: {
-    flexDirection: "row",
-    alignItems: "center",
-    gap: 6,
-  },
-  addStat: {
-    color: "#34d399",
-    fontFamily: MONO_FONT,
-    fontSize: 12,
-    fontWeight: "700",
-  },
-  delStat: {
-    color: "#f87171",
-    fontFamily: MONO_FONT,
-    fontSize: 12,
-    fontWeight: "700",
-  },
-  chevron: {
-    color: "#9ca3af",
-    fontSize: 12,
-  },
-  fileDiffBody: {
-    borderTopWidth: 1,
-    borderTopColor: "#1f2430",
-    backgroundColor: "#0d1017",
-    paddingVertical: 6,
-  },
-  diffLinesContainer: {
-    minWidth: "100%",
-  },
-  diffLine: {
-    paddingHorizontal: 10,
-    paddingVertical: 1,
-  },
-  diffLineContext: {},
-  diffLineHeader: {
-    backgroundColor: "#111827",
-  },
-  diffLineHunk: {
-    backgroundColor: "rgba(56, 189, 248, 0.12)",
-  },
-  diffLineAdd: {
-    backgroundColor: "rgba(16, 185, 129, 0.15)",
-  },
-  diffLineDel: {
-    backgroundColor: "rgba(239, 68, 68, 0.15)",
-  },
-  diffText: {
-    fontFamily: MONO_FONT,
-    fontSize: 11,
-    lineHeight: 16,
-  },
-  diffTextContext: {
-    color: "#9ca3af",
-  },
-  diffTextHeader: {
-    color: "#9ca3af",
-    fontWeight: "700",
-  },
-  diffTextHunk: {
-    color: "#38bdf8",
-  },
-  diffTextAdd: {
-    color: "#6ee7b7",
-  },
-  diffTextDel: {
-    color: "#fca5a5",
-  },
-  emptyDiffText: {
-    color: "#6b7280",
-    fontFamily: MONO_FONT,
-    fontSize: 11,
-    paddingHorizontal: 12,
-    paddingVertical: 6,
-  },
+  overlay: { flex: 1, justifyContent: "flex-end", backgroundColor: "rgba(0,0,0,0.5)" },
+  backdrop: { ...StyleSheet.absoluteFillObject },
+  sheet: { backgroundColor: "#111722", borderTopLeftRadius: 22, borderTopRightRadius: 22, borderWidth: 1, borderColor: "#293345", overflow: "hidden" },
+  handle: { width: 36, height: 4, borderRadius: 2, backgroundColor: "#475569", alignSelf: "center", marginTop: 10, marginBottom: 4 },
+  header: { flexDirection: "row", alignItems: "center", gap: 4, paddingHorizontal: 12, paddingVertical: 6 },
+  titleBlock: { flex: 1, minWidth: 0, gap: 4 },
+  eyebrow: { color: "#94a3b8", fontSize: 11 },
+  title: { color: "#f1f5f9", fontSize: 15, fontWeight: "600" },
+  button: { minWidth: 44, minHeight: 44, justifyContent: "center", alignItems: "center" },
+  link: { color: "#93c5fd", fontSize: 12, fontWeight: "500" },
+  close: { color: "#cbd5e1", fontSize: 26 },
+  scopeRow: { paddingHorizontal: 16, paddingBottom: 12, flexDirection: "row", justifyContent: "space-between", alignItems: "center", gap: 8, borderBottomWidth: 1, borderBottomColor: "#253044" },
+  caption: { color: "#94a3b8", fontSize: 10, flexShrink: 1 },
+  body: { flex: 1 },
+  hidden: { display: "none" },
+  listContent: { paddingHorizontal: 16, paddingBottom: 24 },
+  fileRow: { flexDirection: "row", alignItems: "center", gap: 10, paddingVertical: 17, borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: "#293345" },
+  fileName: { color: "#e2e8f0", fontFamily: MONO_FONT, fontSize: 13 },
+  badge: { color: "#cbd5e1", fontSize: 10, borderRadius: 4, backgroundColor: "#253044", paddingHorizontal: 5, paddingVertical: 3 },
+  add: { color: "#6ee7b7", fontFamily: MONO_FONT, fontSize: 11 },
+  del: { color: "#fca5a5", fontFamily: MONO_FONT, fontSize: 11 },
+  empty: { color: "#94a3b8", textAlign: "center", padding: 32, fontSize: 13 },
+  updateBanner: { paddingHorizontal: 16, paddingVertical: 12, backgroundColor: "#182b45", flexDirection: "row", justifyContent: "space-between", gap: 8 },
+  diffContent: { paddingVertical: 10, paddingBottom: 32 },
+  diffLine: { fontFamily: MONO_FONT, fontSize: 12, lineHeight: 19, paddingHorizontal: 14, minHeight: 19 },
+  diffHeader: { color: "#94a3b8", backgroundColor: "#161e2b" },
+  hunk: { color: "#7dd3fc", backgroundColor: "#142b3b", paddingVertical: 5 },
+  addLine: { color: "#a7f3d0", backgroundColor: "#123129" },
+  delLine: { color: "#fecaca", backgroundColor: "#361e25" },
+  context: { color: "#a8b4c5" },
 });

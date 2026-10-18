@@ -2,6 +2,7 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import {
   ActivityIndicator,
   AppState,
+  Keyboard,
   KeyboardAvoidingView,
   Platform,
   Pressable,
@@ -26,6 +27,7 @@ import {
   type TranscriptItem,
 } from "@mypi/shared";
 import { FileBrowserPanel } from "../components/FileBrowserPanel";
+import { useWorkspaceChanges } from "../store/use-workspace-changes";
 import { GitDiffPanel } from "../components/GitDiffPanel";
 import { flushSessionViews, getSessionView, saveSessionView, sessionViewKey } from "../store/session-view-store";
 import { ToolCallCard } from "../components/ToolCallCard";
@@ -180,7 +182,8 @@ export function SessionDetailScreen({
   onSessionUpdated?: (updated: SessionSummary) => void;
   onBack: () => void;
 }) {
-  const [activeTab, setActiveTab] = useState<"chat" | "files" | "git">("chat");
+  const [activeTab, setActiveTab] = useState<"chat" | "files">("chat");
+  const [showChanges, setShowChanges] = useState(false);
   const [liveState, setLiveState] = useState<SessionLiveState>(() =>
     createInitialSessionState(),
   );
@@ -261,11 +264,22 @@ export function SessionDetailScreen({
   const [quickFilter, setQuickFilter] = useState("");
   const [loadingQuickFiles, setLoadingQuickFiles] = useState(false);
 
+  const workspace = useWorkspaceChanges(client, session.id, liveState.cwd || session.cwd);
+  const openChanges = () => {
+    Keyboard.dismiss();
+    setBottomTray(null);
+    setShowChanges(true);
+    workspace.refresh();
+  };
+
   // Subscribe to SSE durable stream and auto-reconnect on foreground wakeup
   useEffect(() => {
     const unsubscribe = client.subscribeSessionEvents(session.id, {
       onFrame: (frame) => {
         if (frame.type === "snapshot") setSnapshotReady(true);
+        if (frame.type === "snapshot" || (frame.type === "events" && frame.events.some(
+          (event) => event.type === "tool_execution_end" || event.type === "run_end",
+        ))) workspace.refresh();
         setLiveState((prev) => reduceSseFrame(prev, frame));
       },
       onStatusChange: (status, err) => {
@@ -313,12 +327,12 @@ export function SessionDetailScreen({
 
   useEffect(() => {
     if (!snapshotReady) return;
-    if (activeTab === "chat" && isNearBottomRef.current) {
+    if (activeTab === "chat" && !showChanges && isNearBottomRef.current) {
       saveSessionView(viewKey, { advanceKey: transcriptAdvanceKey });
     } else if (transcriptAdvanceKey !== getSessionView(viewKey).advanceKey) {
       setHasNewMessages(true);
     }
-  }, [transcriptAdvanceKey, activeTab, snapshotReady, viewKey]);
+  }, [transcriptAdvanceKey, activeTab, snapshotReady, viewKey, showChanges]);
 
   const scrollToLatest = () => {
     isNearBottomRef.current = true;
@@ -328,7 +342,7 @@ export function SessionDetailScreen({
   };
 
   const restoreOrFollowScroll = () => {
-    if (!snapshotReady || userScrollingRef.current) return;
+    if (!snapshotReady || showChanges || userScrollingRef.current) return;
     if (isNearBottomRef.current) {
       scrollRef.current?.scrollToEnd({ animated: false });
     } else if (restoreScrollRef.current) {
@@ -639,22 +653,6 @@ export function SessionDetailScreen({
               Files
             </Text>
           </Pressable>
-          <Pressable
-            style={[
-              styles.tabBtn,
-              activeTab === "git" ? styles.tabBtnActive : null,
-            ]}
-            onPress={() => setActiveTab("git")}
-          >
-            <Text
-              style={[
-                styles.tabBtnText,
-                activeTab === "git" ? styles.tabBtnTextActive : null,
-              ]}
-            >
-              Diff
-            </Text>
-          </Pressable>
         </View>
       </View>
 
@@ -853,9 +851,7 @@ export function SessionDetailScreen({
         </View>
       )}
 
-      {activeTab === "git" ? (
-        <GitDiffPanel client={client} sessionId={session.id} />
-      ) : activeTab === "files" ? (
+      {activeTab === "files" ? (
         <View style={styles.filesTabContainer}>
           <FileBrowserPanel
             client={client}
@@ -1014,16 +1010,6 @@ export function SessionDetailScreen({
                   >
                     <Text style={styles.quickActionIcon}>📁</Text>
                     <Text style={styles.quickActionLabel}>Browse Files</Text>
-                  </Pressable>
-                  <Pressable
-                    style={styles.quickActionTile}
-                    onPress={() => {
-                      setBottomTray(null);
-                      setActiveTab("git");
-                    }}
-                  >
-                    <Text style={styles.quickActionIcon}>±</Text>
-                    <Text style={styles.quickActionLabel}>Git Diff</Text>
                   </Pressable>
                 </View>
               </View>
@@ -1273,6 +1259,18 @@ export function SessionDetailScreen({
               </View>
             )}
 
+            {(workspace.info?.files.length ?? 0) > 0 && (
+              <Pressable style={styles.changesEntry} onPress={openChanges} accessibilityRole="button">
+                <Text style={styles.changesEntryText}>{workspace.info!.files.length} 个文件有改动</Text>
+                <Text style={styles.changesEntryHint}>{workspace.stale ? "暂未更新 · " : ""}›</Text>
+              </Pressable>
+            )}
+            {workspace.stale && !workspace.info?.files.length && (
+              <Pressable onPress={workspace.refresh} style={styles.changesEntry}>
+                <Text style={styles.changesEntryHint}>改动暂未更新 · 重试</Text>
+              </Pressable>
+            )}
+
             {/* Unified Two-Row Modern Composer Card */}
             <View style={styles.composerCard}>
               <TextInput
@@ -1403,11 +1401,22 @@ export function SessionDetailScreen({
           </View>
         </>
       )}
+      <GitDiffPanel
+        key={activeCwd}
+        info={workspace.info}
+        stale={workspace.stale}
+        visible={showChanges}
+        onClose={() => setShowChanges(false)}
+        onRefresh={workspace.refresh}
+      />
     </KeyboardAvoidingView>
   );
 }
 
 const styles = StyleSheet.create({
+  changesEntry: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", paddingHorizontal: 10, paddingVertical: 12, minHeight: 44 },
+  changesEntryText: { color: "#cbd5e1", fontSize: 12 },
+  changesEntryHint: { color: "#94a3b8", fontSize: 12 },
   newMessages: {
     alignSelf: "center",
     paddingHorizontal: 16,

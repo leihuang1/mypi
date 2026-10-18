@@ -10,6 +10,7 @@ it("restores reading position once, never follows updates while reading, and fol
     ["restoreOrFollowScroll", "scrollToLatest"],
     {
       snapshotReady: false,
+      showChanges: false,
       viewKey: "server/session",
       transcriptAdvanceKey: "new",
       userScrollingRef: { current: false },
