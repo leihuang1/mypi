@@ -266,6 +266,8 @@ export function SessionDetailScreen({
 
   const workspace = useWorkspaceChanges(client, session.id, liveState.cwd || session.cwd);
   const openChanges = () => {
+    isNearBottomRef.current = false;
+    saveSessionView(viewKey, { following: false });
     Keyboard.dismiss();
     setBottomTray(null);
     setShowChanges(true);
@@ -393,15 +395,18 @@ export function SessionDetailScreen({
   const submitMessage = async (request: SendMessageRequest) => {
     const targetSessionId = session.id;
     setSending(true);
+    saveSessionView(viewKey, { failedDraft: { ...request, error: "发送结果尚未确认" } });
     try {
       await client.sendMessage(targetSessionId, request);
+      saveSessionView(viewKey, { failedDraft: null });
       if (mountedRef.current && currentSessionIdRef.current === targetSessionId) {
         setFailedDraft(null);
         setConnError(null);
       }
     } catch (err) {
+      const error = err instanceof Error ? err.message : String(err);
+      saveSessionView(viewKey, { failedDraft: { ...request, error } });
       if (mountedRef.current && currentSessionIdRef.current === targetSessionId) {
-        const error = err instanceof Error ? err.message : String(err);
         // A lost response does not mean the server rejected this request.
         setFailedDraft({ ...request, error });
         setConnError(error);
@@ -888,7 +893,8 @@ export function SessionDetailScreen({
                 contentSize.height -
                 (layoutMeasurement.height + contentOffset.y);
               if (!snapshotReady || restoreScrollRef.current) return;
-              if (userScrollingRef.current) {
+              saveSessionView(viewKey, { offset: Math.max(0, contentOffset.y) });
+              if (userScrollingRef.current || Platform.OS === "web") {
                 isNearBottomRef.current = distanceFromBottom <= 48;
                 if (isNearBottomRef.current) setHasNewMessages(false);
                 saveSessionView(viewKey, {

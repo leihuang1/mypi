@@ -5,6 +5,7 @@ import * as lifecycle from "../src/store/session-lifecycle.js";
 import { loadScreenHandlers } from "./screen-handlers.js";
 
 function composer(onSend: (request: SendMessageRequest, state: any) => Promise<void>) {
+  const saved: Record<string, any> = {};
   const state: Record<string, any> = {
     ...lifecycle,
     session: { id: "fixture" },
@@ -14,6 +15,9 @@ function composer(onSend: (request: SendMessageRequest, state: any) => Promise<v
     isNearBottomRef: { current: false },
     mountedRef: { current: true },
     currentSessionIdRef: { current: "fixture" },
+    viewKey: "server/fixture",
+    saveSessionView: (_key: string, patch: object) => { Object.assign(saved, patch); },
+    saved,
     setBottomTray: () => {},
     setConnError: () => {},
   };
@@ -29,6 +33,16 @@ function composer(onSend: (request: SendMessageRequest, state: any) => Promise<v
 }
 
 describe("composer submission recovery", () => {
+  it("keeps an unconfirmed submission after leaving the session mid-request", async () => {
+    const state = composer(async (_request, current) => {
+      current.mountedRef.current = false;
+      throw new Error("Offline after navigating away");
+    });
+    await state.handleSend();
+    assert.equal(state.saved.failedDraft.content, "Message A");
+    assert.match(state.saved.failedDraft.error, /Offline/);
+  });
+
   it("retries an accepted submission with the same ID after its response is lost", async () => {
     const accepted = new Map<string, string>();
     const requests: SendMessageRequest[] = [];

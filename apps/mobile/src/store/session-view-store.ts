@@ -17,7 +17,14 @@ let writes = Promise.resolve();
 export async function loadSessionViews(): Promise<void> {
   try {
     const raw = await AsyncStorage.getItem(STORAGE_KEY);
-    if (raw) views = JSON.parse(raw);
+    const parsed: unknown = raw ? JSON.parse(raw) : null;
+    if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+      for (const [key, value] of Object.entries(parsed)) {
+        if (value && typeof value.draft === "string" && Number.isFinite(value.offset) && typeof value.following === "boolean") {
+          views[key] = { ...value, advanceKey: typeof value.advanceKey === "string" ? value.advanceKey : "0" };
+        }
+      }
+    }
   } catch {
     // Local storage failure must not prevent using a session.
   }
