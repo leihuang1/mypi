@@ -172,7 +172,7 @@ export default function App() {
     if (target) {
       try { await notifications.unregister(target); }
       catch (err) {
-        setError(`请先关闭该服务器的通知：${err instanceof Error ? err.message : String(err)}`);
+        setError(`无法停止该服务器的监听：${err instanceof Error ? err.message : String(err)}`);
         navigateToScreen("sessions");
         return;
       }
@@ -311,11 +311,11 @@ export default function App() {
 
           <View style={styles.notificationRow}>
             <View style={{ flex: 1 }}>
-              <Text style={styles.notificationTitle}>后台通知</Text>
-              <Text style={styles.notificationHint}>仅运行结束与执行异常 · 不含代码和完整输出</Text>
+              <Text style={styles.notificationTitle}>后台监听与通知</Text>
+              <Text style={styles.notificationHint}>{notifications.hint}</Text>
             </View>
-            <Pressable onPress={notifications.toggle} disabled={notifications.busy} style={styles.serverBtn} accessibilityRole="switch" accessibilityState={{ checked: notifications.enabled, disabled: notifications.busy }}>
-              <Text style={styles.serverBtnText}>{notifications.busy ? "同步中…" : notifications.enabled ? "已开启" : "开启"}</Text>
+            <Pressable onPress={notifications.toggle} disabled={notifications.busy || !notifications.supported} style={styles.serverBtn} accessibilityRole="switch" accessibilityLabel="后台监听与本地通知" accessibilityState={{ checked: notifications.running, disabled: notifications.busy || !notifications.supported }}>
+              <Text style={styles.serverBtnText}>{!notifications.supported ? (Platform.OS === "android" ? "需原生版" : "仅 Android") : notifications.busy ? "更新中…" : notifications.running ? "已开启" : notifications.enabled ? "恢复" : "开启"}</Text>
             </Pressable>
           </View>
           {notifications.error && <Text style={styles.notificationError}>{notifications.error}</Text>}

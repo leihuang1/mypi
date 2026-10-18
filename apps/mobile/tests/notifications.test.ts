@@ -1,44 +1,56 @@
 import assert from "node:assert/strict";
 import { it } from "node:test";
 import { loadScreenHandlers } from "./screen-handlers.js";
+import { parseNotificationLink } from "../src/store/notification-link.js";
 
-it("asks permission only on explicit enable and keeps other functionality available after denial", async () => {
-  let asks = 0;
-  let registrations = 0;
-  const state = loadScreenHandlers(
-    new URL("../src/store/use-notifications.ts", import.meta.url),
-    ["sync", "toggle"],
-    {
-      server: { id: "server", url: "http://fixture", token: "fixture" },
-      servers: [{ id: "server", url: "http://fixture", token: "fixture" }],
-      preferences: { deviceId: "test-device", enabled: {} as Record<string, boolean> },
-      enabled: false,
-      changing: { current: false },
-      syncJob: { current: Promise.resolve() },
-      syncing: false,
-      cancelled: false,
-      Platform: { OS: "android" },
-      Notifications: {
-        AndroidImportance: { DEFAULT: 3 }, AndroidNotificationVisibility: { PRIVATE: 0 },
-        setNotificationChannelAsync: async () => {},
-        getPermissionsAsync: async () => ({ granted: false, canAskAgain: true }),
-        requestPermissionsAsync: async () => { asks++; return { granted: false }; },
-      },
-      pushToken: async () => { throw new Error("Must not request token without permission"); },
-      MyPiClient: class { async registerNotifications() { registrations++; } },
-      setBusy: (_busy: boolean) => {},
-      setPreferences: (_next: unknown) => {},
-      setError: (_error: string | null) => {},
+function controls(running = false, enabled = false, granted = false) {
+  const calls: string[] = [];
+  const current = { running, enabledServerIds: enabled ? ["server"] : [] };
+  const handlers = loadScreenHandlers(new URL("../src/store/use-notifications.ts", import.meta.url), ["toggle", "unregister"], {
+    server: { id: "server", url: "http://fixture", token: "fixture" },
+    changing: { current: false },
+    Platform: { OS: "android", Version: 33 },
+    monitor: {
+      getState: async () => current,
+      enable: async (_json: string) => { calls.push("enable"); return current; },
+      disable: async (_id: string) => { calls.push("disable"); return current; },
     },
-  );
-  await state.sync();
-  assert.equal(asks, 0);
-  assert.equal(registrations, 0);
-  await state.toggle();
-  assert.equal(asks, 1);
-  assert.equal(registrations, 0);
-  assert.equal(state.changing.current, false);
-  assert.equal(state.preferences.enabled.server, undefined);
+    PermissionsAndroid: {
+      PERMISSIONS: { POST_NOTIFICATIONS: "notifications" }, RESULTS: { GRANTED: "granted" },
+      check: async () => granted,
+      request: async () => { calls.push("permission"); return "denied"; },
+    },
+    setBusy: (_busy: boolean) => {},
+    setState: (_next: unknown) => {},
+    setError: (_error: string | null) => {},
+  });
+  return { calls, handlers };
+}
+
+it("requests permission only on enable and never starts a service after denial", async () => {
+  const { calls, handlers } = controls();
+  assert.deepEqual(calls, []);
+  await handlers.toggle();
+  assert.deepEqual(calls, ["permission"]);
+  assert.equal(handlers.changing.current, false);
+});
+
+it("disables locally without permission prompts and resumes stopped monitoring only on request", async () => {
+  const active = controls(true, true);
+  await active.handlers.toggle();
+  assert.deepEqual(active.calls, ["disable"]);
+  const stopped = controls(false, true, true);
+  await stopped.handlers.toggle();
+  assert.deepEqual(stopped.calls, ["enable"]);
+  await stopped.handlers.unregister({ id: "server" });
+  assert.deepEqual(stopped.calls, ["enable", "disable"]);
+});
+
+it("notification links identify only a paired server/session, not an arbitrary URL", () => {
+  assert.deepEqual(parseNotificationLink("mypi://session?serverId=server-1&sessionId=abc&eventId=daemon%3A5"), { serverId: "server-1", sessionId: "abc" });
+  for (const url of ["https://example.com/session?serverId=x&sessionId=y", "mypi://connect?url=http://server", "mypi://session?serverId=x&sessionId=../secrets", "invalid"]) {
+    assert.equal(parseNotificationLink(url), null);
+  }
 });
 
 it("opening a notification fetches its own server/session and ignores a response after navigation changes", async () => {

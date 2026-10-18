@@ -6,5 +6,9 @@ ios/
 *.log
 .DS_Store
 .env
+!apps/mobile/modules/*/android/
+!apps/mobile/modules/*/android/**
+**/build/
+**/.gradle/
 apps/mobile/google-services.json
 *service-account*.json

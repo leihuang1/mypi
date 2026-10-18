@@ -1,0 +1,22 @@
+apply plugin: 'com.android.library'
+
+group = 'dev.mypi.monitor'
+version = '0.1.0'
+
+def expoModulesCorePlugin = new File(project(':expo-modules-core').projectDir, 'ExpoModulesCorePlugin.gradle')
+apply from: expoModulesCorePlugin
+applyKotlinExpoModulesCorePlugin()
+useCoreDependencies()
+useDefaultAndroidSdkVersions()
+
+android {
+  namespace 'dev.mypi.monitor'
+  defaultConfig {
+    versionCode 1
+    versionName '0.1.0'
+  }
+}
+
+dependencies {
+  testImplementation 'junit:junit:4.13.2'
+}

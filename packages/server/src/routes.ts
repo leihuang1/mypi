@@ -4,7 +4,7 @@ import type {
   CreateDirectoryRequest,
   CreateSessionRequest,
   GitCloneRequest,
-  NotificationDeviceRequest,
+  NotificationFrame,
   ResetSessionRequest,
   SendMessageRequest,
   SseFrame,
@@ -126,19 +126,35 @@ export function createRequestHandler(options: {
         sendError(res, 401, "unauthorized", "Invalid or missing bearer token");
         return;
       }
-      if (req.method === "POST" && pathname === "/v1/notifications/devices") {
-        try {
-          manager.notifications.register(await readJsonBody<NotificationDeviceRequest>(req));
-          sendJson(res, 200, { ok: true });
-        } catch {
-          sendError(res, 400, "invalid", "Invalid notification registration or unavailable storage");
+      if (req.method === "GET" && pathname === "/v1/notifications/events") {
+        const cursor = url.searchParams.get("cursor") ?? undefined;
+        if (cursor !== undefined && !/^[a-zA-Z0-9-]{1,80}:\d{1,16}$/.test(cursor)) {
+          sendError(res, 400, "invalid", "Invalid notification cursor");
+          return;
         }
-        return;
-      }
-      if (req.method === "POST" && pathname === "/v1/notifications/presence") {
-        const body = await readJsonBody<{ deviceId: string; sessionId: string | null }>(req);
-        manager.notifications.presence(body.deviceId, body.sessionId);
-        sendJson(res, 200, { ok: true });
+        res.writeHead(200, {
+          "Content-Type": "text/event-stream; charset=utf-8",
+          "Cache-Control": "no-cache, no-transform",
+          Connection: "keep-alive",
+          "X-Accel-Buffering": "no",
+        });
+        const write = (frame: NotificationFrame) => {
+          if (res.destroyed || res.writableEnded) return;
+          // Bound memory for slow/disconnected phones; reconnect replays from their saved cursor.
+          if (res.writableLength > 256 * 1024) { res.destroy(); return; }
+          res.write(`data: ${JSON.stringify(frame)}\n\n`);
+        };
+        const unsubscribe = manager.notifications.subscribe(cursor, write);
+        const heartbeat = setInterval(() => write({ type: "heartbeat" }), 15_000);
+        const cleanup = () => {
+          clearInterval(heartbeat);
+          unsubscribe();
+          activeResponses?.delete(res);
+        };
+        req.once("close", cleanup);
+        res.once("close", cleanup);
+        if (req.destroyed || res.destroyed) cleanup();
+        else activeResponses?.add(res);
         return;
       }
 

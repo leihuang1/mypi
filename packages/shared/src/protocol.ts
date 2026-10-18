@@ -141,12 +141,19 @@ export interface AbortSubmissionResponse {
   status: "aborted" | "already_placed" | "settled" | "not_found";
 }
 
-export interface NotificationDeviceRequest {
-  deviceId: string;
-  serverId: string;
-  enabled: boolean;
-  pushToken?: string;
+export interface RunNotification {
+  type: "notice";
+  cursor: string;
+  sessionId: string;
+  title: string;
+  body: string;
+  createdAt: number;
 }
+
+export type NotificationFrame =
+  | RunNotification
+  | { type: "ready"; cursor: string; gap?: boolean }
+  | { type: "heartbeat" };
 
 export interface SendMessageRequest {
   requestId: string;

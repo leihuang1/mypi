@@ -5,7 +5,7 @@
     "version": "0.1.0",
     "orientation": "portrait",
     "userInterfaceStyle": "dark",
-    "newArchEnabled": true,
+    "newArchEnabled": false,
     "scheme": "mypi",
     "ios": {
       "supportsTablet": true,
@@ -19,12 +19,12 @@
     "android": {
       "package": "dev.mypi.app",
       "usesCleartextTraffic": true,
+      "allowBackup": false,
       "permissions": [
         "android.permission.CAMERA"
       ]
     },
     "plugins": [
-      ["expo-notifications", { "defaultChannel": "runs", "color": "#60a5fa" }],
       [
         "expo-camera",
         {
