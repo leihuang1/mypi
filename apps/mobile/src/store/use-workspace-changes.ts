@@ -18,7 +18,9 @@ export function useWorkspaceChanges(client: MyPiClient, sessionId: string, cwd: 
       try {
         const info = await client.getGitStatus(sessionId);
         if (cancelled) return;
+        cache.delete(key);
         cache.set(key, info);
+        if (cache.size > 8) cache.delete(cache.keys().next().value!);
         setResult({ key, info, stale: false });
       } catch {
         if (!cancelled) setResult((prev) => ({ ...prev, stale: true }));

@@ -340,7 +340,8 @@ export function SessionDetailScreen({
     isNearBottomRef.current = true;
     setHasNewMessages(false);
     saveSessionView(viewKey, { following: true, advanceKey: transcriptAdvanceKey });
-    scrollRef.current?.scrollToEnd({ animated: true });
+    // A jump must not leave an old scroll animation competing with arriving content.
+    scrollRef.current?.scrollToEnd({ animated: false });
   };
 
   const restoreOrFollowScroll = () => {
@@ -595,7 +596,7 @@ export function SessionDetailScreen({
       style={styles.container}
       behavior={Platform.OS === "ios" ? "padding" : undefined}
     >
-      {/* Row 1: Compact Top Header (Back Icon + Session Title/CWD + 3-Way View Tabs) */}
+      {/* Compact header: session title, workspace, and chat/files tabs */}
       <View style={styles.topBar}>
         <Pressable
           onPress={onBack}

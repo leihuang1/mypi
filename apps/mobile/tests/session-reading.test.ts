@@ -21,7 +21,10 @@ it("restores reading position once, never follows updates while reading, and fol
       setHasNewMessages: () => {},
       scrollRef: { current: {
         scrollTo: (args: unknown) => scrolls.push(args),
-        scrollToEnd: () => scrolls.push("end"),
+        scrollToEnd: (options: { animated: boolean }) => {
+          assert.equal(options.animated, false, "Jump/follow must not race an in-flight scroll animation");
+          scrolls.push("end");
+        },
       } },
     },
   );

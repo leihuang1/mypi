@@ -79,9 +79,13 @@ export function GitDiffPanel({ info, stale, visible, onClose, onRefresh }: {
               ref={listRef}
               data={files}
               keyExtractor={(file) => file.path}
-              onScroll={(event) => { listOffset.current = event.nativeEvent.contentOffset.y; }}
+              onScroll={(event) => {
+                if (!selected) listOffset.current = event.nativeEvent.contentOffset.y;
+              }}
               scrollEventThrottle={32}
-              onLayout={() => listRef.current?.scrollToOffset({ offset: listOffset.current, animated: false })}
+              onLayout={() => {
+                if (!selected) listRef.current?.scrollToOffset({ offset: listOffset.current, animated: false });
+              }}
               contentContainerStyle={styles.listContent}
               ListEmptyComponent={<Text style={styles.empty}>暂无可展示的文本改动</Text>}
               renderItem={({ item: file }) => {
