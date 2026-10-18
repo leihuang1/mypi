@@ -18,6 +18,7 @@ import {
 import { NewSessionScreen } from "./src/screens/NewSessionScreen";
 import { PairServerScreen } from "./src/screens/PairServerScreen";
 import { SessionDetailScreen } from "./src/screens/SessionDetailScreen";
+import { loadSessionViews, removeSessionView } from "./src/store/session-view-store";
 import type { AppScreenName } from "./src/store/session-lifecycle";
 import {
   loadSavedServers,
@@ -86,7 +87,7 @@ export default function App() {
 
   useEffect(() => {
     (async () => {
-      const stored = await loadSavedServers();
+      const [stored] = await Promise.all([loadSavedServers(), loadSessionViews()]);
       setServers(stored.servers);
       setActiveId(stored.activeId);
       activeServerIdRef.current = stored.activeId;
@@ -181,6 +182,7 @@ export default function App() {
     const targetServerId = activeServerId;
     try {
       await client.deleteSession(sessionId);
+      if (targetServerId) removeSessionView(targetServerId, sessionId);
       if (activeServerIdRef.current !== targetServerId) return;
       setSessions((prev) => prev.filter((s) => s.id !== sessionId));
       setActiveSession((prev) => (prev?.id === sessionId ? null : prev));
@@ -229,6 +231,8 @@ export default function App() {
         />
       ) : screen === "session-detail" && activeSession ? (
         <SessionDetailScreen
+          key={`${activeServerId}:${activeSession.id}`}
+          serverId={activeServerId!}
           client={client}
           device={device ?? undefined}
           session={activeSession}

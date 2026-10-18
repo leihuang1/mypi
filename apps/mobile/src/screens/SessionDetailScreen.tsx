@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useRef, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   ActivityIndicator,
   AppState,
@@ -27,6 +27,7 @@ import {
 } from "@mypi/shared";
 import { FileBrowserPanel } from "../components/FileBrowserPanel";
 import { GitDiffPanel } from "../components/GitDiffPanel";
+import { flushSessionViews, getSessionView, saveSessionView, sessionViewKey } from "../store/session-view-store";
 import { ToolCallCard } from "../components/ToolCallCard";
 import {
   type FailedSubmissionDraft,
@@ -165,12 +166,14 @@ function TranscriptItemRow({ item }: { item: TranscriptItem }) {
 }
 
 export function SessionDetailScreen({
+  serverId,
   client,
   device,
   session,
   onSessionUpdated,
   onBack,
 }: {
+  serverId: string;
   client: MyPiClient;
   device?: DeviceInfo;
   session: SessionSummary;
@@ -185,14 +188,22 @@ export function SessionDetailScreen({
     "connecting" | "connected" | "reconnecting" | "error"
   >("connecting");
   const [connError, setConnError] = useState<string | null>(null);
-  const [inputText, setInputText] = useState("");
-  const [failedDraft, setFailedDraft] = useState<FailedSubmissionDraft | null>(
-    null,
-  );
+  const viewKey = sessionViewKey(serverId, session.id);
+  const savedView = useRef(getSessionView(viewKey)).current;
+  const [inputText, setInputText] = useState(savedView.draft);
+  const [failedDraft, setFailedDraft] = useState<FailedSubmissionDraft | null>(savedView.failedDraft);
+  const [snapshotReady, setSnapshotReady] = useState(false);
+  const [hasNewMessages, setHasNewMessages] = useState(false);
+  const restoreScrollRef = useRef(true);
+  const userScrollingRef = useRef(false);
   const [sending, setSending] = useState(false);
   const [streamGeneration, setStreamGeneration] = useState(0);
   const scrollRef = useRef<ScrollView | null>(null);
-  const isNearBottomRef = useRef(true);
+  const attachScroll = useCallback((node: ScrollView | null) => {
+    if (node !== scrollRef.current) restoreScrollRef.current = true;
+    scrollRef.current = node;
+  }, []);
+  const isNearBottomRef = useRef(savedView.following);
   const mountedRef = useRef(true);
   const currentSessionIdRef = useRef(session.id);
   currentSessionIdRef.current = session.id;
@@ -206,6 +217,7 @@ export function SessionDetailScreen({
       typeof next === "function" ? next(inputTextRef.current) : next;
     inputTextRef.current = resolved;
     setInputText(resolved);
+    saveSessionView(viewKey, { draft: resolved });
   };
 
   useEffect(() => {
@@ -216,9 +228,10 @@ export function SessionDetailScreen({
   }, []);
 
   useEffect(() => {
-    updateInputText("");
-    setFailedDraft(null);
-  }, [session.id]);
+    saveSessionView(viewKey, { failedDraft });
+  }, [viewKey, failedDraft]);
+
+  useEffect(() => () => flushSessionViews(), []);
 
   // Separated Top Popovers:
   // - "rename": tapped top session title -> rename session or jump to CWD
@@ -252,6 +265,7 @@ export function SessionDetailScreen({
   useEffect(() => {
     const unsubscribe = client.subscribeSessionEvents(session.id, {
       onFrame: (frame) => {
+        if (frame.type === "snapshot") setSnapshotReady(true);
         setLiveState((prev) => reduceSseFrame(prev, frame));
       },
       onStatusChange: (status, err) => {
@@ -263,6 +277,8 @@ export function SessionDetailScreen({
     const appStateSub = AppState.addEventListener("change", (nextState) => {
       if (nextState === "active") {
         setStreamGeneration((g) => g + 1);
+      } else {
+        flushSessionViews();
       }
     });
 
@@ -296,12 +312,30 @@ export function SessionDetailScreen({
   }, [liveState.items.length, lastTranscriptItem]);
 
   useEffect(() => {
+    if (!snapshotReady) return;
     if (activeTab === "chat" && isNearBottomRef.current) {
-      requestAnimationFrame(() => {
-        scrollRef.current?.scrollToEnd({ animated: true });
-      });
+      saveSessionView(viewKey, { advanceKey: transcriptAdvanceKey });
+    } else if (transcriptAdvanceKey !== getSessionView(viewKey).advanceKey) {
+      setHasNewMessages(true);
     }
-  }, [transcriptAdvanceKey, activeTab]);
+  }, [transcriptAdvanceKey, activeTab, snapshotReady, viewKey]);
+
+  const scrollToLatest = () => {
+    isNearBottomRef.current = true;
+    setHasNewMessages(false);
+    saveSessionView(viewKey, { following: true, advanceKey: transcriptAdvanceKey });
+    scrollRef.current?.scrollToEnd({ animated: true });
+  };
+
+  const restoreOrFollowScroll = () => {
+    if (!snapshotReady || userScrollingRef.current) return;
+    if (isNearBottomRef.current) {
+      scrollRef.current?.scrollToEnd({ animated: false });
+    } else if (restoreScrollRef.current) {
+      scrollRef.current?.scrollTo({ y: getSessionView(viewKey).offset, animated: false });
+    }
+    restoreScrollRef.current = false;
+  };
 
   const modelMeta = useMemo(
     () =>
@@ -841,17 +875,32 @@ export function SessionDetailScreen({
       ) : (
         <>
           <ScrollView
-            ref={scrollRef}
+            ref={attachScroll}
             style={styles.chatScroll}
             contentContainerStyle={styles.chatContent}
-            scrollEventThrottle={16}
+            scrollEventThrottle={32}
+            onContentSizeChange={restoreOrFollowScroll}
+            onLayout={restoreOrFollowScroll}
+            onScrollBeginDrag={() => { userScrollingRef.current = true; }}
+            onScrollEndDrag={() => { userScrollingRef.current = false; }}
+            onMomentumScrollBegin={() => { userScrollingRef.current = true; }}
+            onMomentumScrollEnd={() => { userScrollingRef.current = false; }}
             onScroll={(e) => {
               const { layoutMeasurement, contentOffset, contentSize } =
                 e.nativeEvent;
               const distanceFromBottom =
                 contentSize.height -
                 (layoutMeasurement.height + contentOffset.y);
-              isNearBottomRef.current = distanceFromBottom <= 96;
+              if (!snapshotReady || restoreScrollRef.current) return;
+              if (userScrollingRef.current) {
+                isNearBottomRef.current = distanceFromBottom <= 48;
+                if (isNearBottomRef.current) setHasNewMessages(false);
+                saveSessionView(viewKey, {
+                  offset: Math.max(0, contentOffset.y),
+                  following: isNearBottomRef.current,
+                  ...(isNearBottomRef.current ? { advanceKey: transcriptAdvanceKey } : {}),
+                });
+              }
             }}
           >
             {liveState.items.length === 0 ? (
@@ -878,6 +927,12 @@ export function SessionDetailScreen({
               </View>
             )}
           </ScrollView>
+
+          {hasNewMessages && (
+            <Pressable style={styles.newMessages} onPress={scrollToLatest} accessibilityRole="button">
+              <Text style={styles.newMessagesText}>新消息 ↓</Text>
+            </Pressable>
+          )}
 
           {/* Bottom Composer Dock & Thumb-Reachable Quick Popovers */}
           <View style={styles.composerDock}>
@@ -1353,6 +1408,17 @@ export function SessionDetailScreen({
 }
 
 const styles = StyleSheet.create({
+  newMessages: {
+    alignSelf: "center",
+    paddingHorizontal: 16,
+    paddingVertical: 10,
+    borderRadius: 20,
+    backgroundColor: "#1e293b",
+    borderWidth: 1,
+    borderColor: "#334155",
+    marginVertical: 6,
+  },
+  newMessagesText: { color: "#93c5fd", fontSize: 12, fontWeight: "600" },
   container: {
     flex: 1,
     backgroundColor: "#0b0e14",
