@@ -35,20 +35,24 @@ npm run mobile:ios
 npm run mobile:web
 ```
 
+The npm launch scripts set `EXPO_OFFLINE=1` so an unavailable Expo metadata/version API cannot terminate Metro. This does not disable LAN/Tailscale, model requests, or npm/Gradle dependency downloads. Run Expo's dependency checks explicitly when upgrading SDK versions.
+
+**Debug builds require Metro on port 8081 to open the UI.** A `Cannot connect to Metro` warning is not a daemon connection error. For everyday phone use, install the standalone release build below; it bundles the JS and does not need Metro.
+
 On macOS with Android Studio, use `export JAVA_HOME="/Applications/Android Studio.app/Contents/jbr/Contents/Home"` if your shell still defaults to Java 11.
 
 Native code changes require rebuilding the App, not just reloading Metro. SDK 52 currently uses the legacy React Native architecture (`newArchEnabled: false`), matching the working local build and avoiding RN 0.76's C++ incompatibility with the installed NDK 29. Revisit this setting when upgrading React Native/Expo. For an existing generated Android project, update native configuration without deleting it:
 
 ```bash
 cd apps/mobile
-npx expo prebuild --platform android --no-install
+EXPO_OFFLINE=1 npx expo prebuild --platform android --no-install
 ```
 
 For a standalone self-use APK without a Metro dependency:
 
 ```bash
 cd apps/mobile
-npx expo run:android --variant release
+EXPO_OFFLINE=1 npx expo run:android --variant release
 ```
 
 No Expo account/projectId, Firebase, APNs, Google Play services or Xiaomi push credentials are needed. Build tools still need to download npm/Maven dependencies on the first build.
