@@ -14,6 +14,7 @@ export interface RunNoticeState {
   queued?: boolean;
   stopped?: boolean;
   error?: FailureCause;
+  terminalError?: FailureCause;
   pending?: RunNotice;
 }
 
@@ -48,10 +49,12 @@ export function reduceRunNotice(state: RunNoticeState, event: RawAgentEvent): Ru
       if (record.status === "unanswered") {
         if (record.reason === "aborted" || record.reason === "reset") return { ...state, stopped: true };
         const error = record.reason === "no_model" ? "no_model" : record.reason === "model_error" ? "model" : "task";
-        return { ...state, error, pending: state.pending ? { ...state.pending, kind: "error", cause: error } : undefined };
+        return { ...state, error, terminalError: error, pending: state.pending ? { ...state.pending, kind: "error", cause: error } : undefined };
       }
-      if (record.status === "done" && state.error === "task") {
-        return { ...state, error: undefined, pending: state.pending ? { ...state.pending, kind: "ended", cause: undefined } : undefined };
+      if (record.status === "done") {
+        // Success clears provisional errors, not a settled failure from a merged run.
+        const error = state.terminalError;
+        return { ...state, error, pending: state.pending ? { ...state.pending, kind: error ? "error" : "ended", cause: error } : undefined };
       }
       return state;
     }

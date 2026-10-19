@@ -41,20 +41,6 @@ Scan the daemon's QR code or enter its URL and token, then choose a project dire
 
 Use a trusted LAN, Tailscale, or HTTPS; the bearer token grants access to the daemon. USB localhost forwarding is for wired debugging only.
 
-## Git Diffs
-
-In a Git workspace, tap the changed-file count above the chat input, then select a file to open its full-screen diff. The entry is hidden when there are no supported changes.
-
-Diffs show **uncommitted text changes across the entire workspace relative to HEAD**, including staged, unstaged, and untracked files—not just edits made by the current session. Binary and empty changes are excluded. An opened diff stays unchanged until you explicitly refresh it.
-
-## Android Notifications
-
-Enable background monitoring from the session list and grant notification permission. A native foreground service keeps a connection to the daemon; its persistent notification includes a stop action.
-
-Run endings and terminal errors trigger local notifications that open the relevant session. Queued runs are combined; deliberate stops and the session currently being viewed do not alert.
-
-The phone must be able to reach the daemon. Delivery is best-effort: force-stop, reboot, connectivity loss, or battery restrictions can interrupt monitoring. Reopen the App and resume monitoring if needed. This feature requires the native Android App; it is unavailable in Expo Go, iOS, and Web.
-
 ## Development
 
 Run these commands from the repository root:

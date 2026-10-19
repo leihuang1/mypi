@@ -1,22 +1,6 @@
 import assert from "node:assert/strict";
-import fs from "node:fs";
-import vm from "node:vm";
 import { it } from "node:test";
-import ts from "typescript";
-
-function loadStore(storage: Map<string, string>) {
-  const source = fs.readFileSync(new URL("../src/store/session-view-store.ts", import.meta.url), "utf8");
-  const { outputText } = ts.transpileModule(source, { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022, esModuleInterop: true } });
-  const exports: Record<string, any> = {};
-  vm.runInNewContext(outputText, {
-    exports, console, setTimeout, clearTimeout,
-    require: () => ({
-      getItem: async (key: string) => storage.get(key) ?? null,
-      setItem: async (key: string, value: string) => { storage.set(key, value); },
-    }),
-  });
-  return exports;
-}
+import { loadSessionViewStore as loadStore } from "./screen-handlers.js";
 
 it("persists drafts and reading position separately for each server/session across restart", async () => {
   const storage = new Map<string, string>();

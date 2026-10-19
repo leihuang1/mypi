@@ -29,7 +29,7 @@ import {
 import { FileBrowserPanel } from "../components/FileBrowserPanel";
 import { useWorkspaceChanges } from "../store/use-workspace-changes";
 import { GitDiffPanel } from "../components/GitDiffPanel";
-import { flushSessionViews, getSessionView, saveSessionView, sessionViewKey } from "../store/session-view-store";
+import { flushSessionViews, getSessionView, persistSessionViews, saveSessionView, sessionViewKey } from "../store/session-view-store";
 import { ToolCallCard } from "../components/ToolCallCard";
 import {
   type FailedSubmissionDraft,
@@ -230,10 +230,6 @@ export function SessionDetailScreen({
     };
   }, []);
 
-  useEffect(() => {
-    saveSessionView(viewKey, { failedDraft });
-  }, [viewKey, failedDraft]);
-
   useEffect(() => () => flushSessionViews(), []);
 
   // Separated Top Popovers:
@@ -396,16 +392,25 @@ export function SessionDetailScreen({
   const submitMessage = async (request: SendMessageRequest) => {
     const targetSessionId = session.id;
     setSending(true);
-    saveSessionView(viewKey, { failedDraft: { ...request, error: "发送结果尚未确认" } });
+    const pending = { ...request, error: "发送结果尚未确认" };
+    saveSessionView(viewKey, { failedDraft: pending });
+    let persisted = false;
     try {
+      await persistSessionViews();
+      persisted = true;
+      // Record identity also distinguishes overlapping retries of the same request ID.
+      if (getSessionView(viewKey).failedDraft !== pending) return;
       await client.sendMessage(targetSessionId, request);
+      if (getSessionView(viewKey).failedDraft !== pending) return;
       saveSessionView(viewKey, { failedDraft: null });
       if (mountedRef.current && currentSessionIdRef.current === targetSessionId) {
         setFailedDraft(null);
         setConnError(null);
       }
     } catch (err) {
-      const error = err instanceof Error ? err.message : String(err);
+      if (getSessionView(viewKey).failedDraft !== pending) return;
+      const detail = err instanceof Error ? err.message : String(err);
+      const error = persisted ? detail : `无法保存消息，本次未发送。请检查设备存储后重试：${detail}`;
       saveSessionView(viewKey, { failedDraft: { ...request, error } });
       if (mountedRef.current && currentSessionIdRef.current === targetSessionId) {
         // A lost response does not mean the server rejected this request.
@@ -438,6 +443,11 @@ export function SessionDetailScreen({
     await submitMessage(request);
   };
 
+  const handleDismissFailedDraft = () => {
+    saveSessionView(viewKey, { failedDraft: null });
+    setFailedDraft(null);
+  };
+
   const handleRestoreFailedDraft = () => {
     if (!failedDraft || sending) return;
     const restored = restoreFailedDraftToInput(
@@ -445,7 +455,7 @@ export function SessionDetailScreen({
       failedDraft,
     );
     updateInputText(restored.inputText);
-    setFailedDraft(null);
+    handleDismissFailedDraft();
   };
 
   const handleAbort = async () => {
@@ -1256,7 +1266,7 @@ export function SessionDetailScreen({
                   </Pressable>
                   <Pressable
                     style={styles.failedDismissBtn}
-                    onPress={() => setFailedDraft(null)}
+                    onPress={handleDismissFailedDraft}
                     disabled={sending}
                     accessibilityLabel="Dismiss failed message"
                   >

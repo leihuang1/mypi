@@ -14,6 +14,74 @@ const submitted = (id: number, reason?: string): RawAgentEvent => ({
   type: "submission", record: { id, type: "input", status: reason ? "unanswered" : "done", reason },
 });
 const snapshot: RawAgentEvent = { type: "snapshot", entries: [], tools: [], compactions: [], inbox: [], agent: {} };
+const assistant = (stopReason: string): RawAgentEvent => ({
+  type: "message_end", entry: { id: 1, conversationId: 0, kind: "assistant", model: [{ role: "assistant", stopReason }] },
+});
+
+for (const recovery of ["retry", "compaction"]) {
+  it(`notifies normally after a model error recovers through ${recovery}`, async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "mypi-notice-recovery-"));
+    const service = new NotificationService(dir, () => "session", 5);
+    const frames: NotificationFrame[] = [];
+    try {
+      service.subscribe(undefined, (frame) => { if (frame.type === "notice") frames.push(frame); });
+      const recoveryEvents: RawAgentEvent[] = recovery === "retry" ? [
+        { type: "auto_retry_start", attempt: 1, at: Date.now(), errorMessage: "temporary" }, assistant("error"),
+        { type: "auto_retry_end", attempt: 1 },
+      ] : [
+        assistant("error"), { type: "compaction_start", taskId: 8, reason: "overflow", blocking: true },
+        { type: "compaction_end", taskId: 8, reason: "overflow" },
+      ];
+      service.events("s", [start(1), ...recoveryEvents, assistant("stop"), end(1), submitted(1)]);
+      await sleep(20);
+      assert.equal(frames.length, 1);
+      assert.ok(frames[0].type === "notice");
+      assert.equal(frames[0].body, "运行已结束，点此查看");
+      service.events("s", [start(2), ...recoveryEvents, assistant("error"), end(2), submitted(2, "model_error")]);
+      await sleep(20);
+      assert.equal(frames.length, 2);
+      assert.ok(frames[1].type === "notice");
+      assert.match(frames[1].body, /模型请求失败/);
+    } finally { await service.close(); fs.rmSync(dir, { recursive: true, force: true }); }
+  });
+}
+
+it("notifies terminal failure despite a waiting follow-up, but still suppresses deliberate stops and duplicates", async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "mypi-notice-queue-failure-"));
+  const service = new NotificationService(dir, () => "session", 5);
+  const frames: NotificationFrame[] = [];
+  const queued: RawAgentEvent = { type: "inbox_update", items: [{ id: 2, mode: "followUp" }] };
+  try {
+    service.subscribe(undefined, (frame) => { if (frame.type === "notice") frames.push(frame); });
+    for (const reason of ["model_error", "no_model"]) {
+      service.events(reason, [start(1), queued, assistant("error"), end(1), submitted(1, reason)]);
+    }
+    service.events("stopped", [start(1), queued, assistant("error"), end(1), submitted(1, "aborted")]);
+    await sleep(20);
+    assert.equal(frames.length, 2);
+    assert.ok(frames.every((frame) => frame.type === "notice" && frame.body.startsWith("执行异常")));
+    service.events("model_error", [end(1), submitted(1, "model_error"), queued]);
+    await sleep(20);
+    assert.equal(frames.length, 2);
+  } finally { await service.close(); fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
+it("does not erase an earlier terminal failure when a merged successor succeeds", async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "mypi-notice-merged-failure-"));
+  let service = new NotificationService(dir, () => "session", 5);
+  try {
+    service.events("s", [start(1), end(1), submitted(1, "task_error"), start(2), assistant("error")]);
+    await service.close();
+    service = new NotificationService(dir, () => "session", 5);
+    const frames: NotificationFrame[] = [];
+    service.subscribe(undefined, (frame) => { if (frame.type === "notice") frames.push(frame); });
+    service.events("s", [assistant("stop"), end(2), submitted(2)]);
+    await sleep(20);
+    assert.equal(frames.length, 1);
+    assert.ok(frames[0].type === "notice");
+    assert.match(frames[0].body, /执行任务中断/);
+  } finally { await service.close(); fs.rmSync(dir, { recursive: true, force: true }); }
+});
 
 it("coalesces queues, suppresses stopped runs, ignores recoverable errors and deduplicates across restart", async () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "mypi-notice-"));

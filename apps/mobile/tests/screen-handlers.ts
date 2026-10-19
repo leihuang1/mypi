@@ -3,6 +3,22 @@ import fs from "node:fs";
 import vm from "node:vm";
 import ts from "typescript";
 
+export function loadSessionViewStore(
+  storage = new Map<string, string>(),
+  setItem = async (key: string, value: string) => { storage.set(key, value); },
+): typeof import("../src/store/session-view-store.js") {
+  const source = fs.readFileSync(new URL("../src/store/session-view-store.ts", import.meta.url), "utf8");
+  const { outputText } = ts.transpileModule(source, {
+    compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022, esModuleInterop: true },
+  });
+  const exports = {};
+  vm.runInNewContext(outputText, {
+    exports, console, setTimeout, clearTimeout,
+    require: () => ({ getItem: async (key: string) => storage.get(key) ?? null, setItem }),
+  });
+  return exports as typeof import("../src/store/session-view-store.js");
+}
+
 // Exercise the real screen callbacks without requiring a native React renderer.
 export function loadScreenHandlers<T extends Record<string, unknown>>(
   file: URL,

@@ -44,10 +44,16 @@ export function saveSessionView(key: string, patch: Partial<SessionViewState>): 
   timer = setTimeout(flushSessionViews, 300);
 }
 
-export function flushSessionViews(): void {
+export function persistSessionViews(): Promise<void> {
   clearTimeout(timer);
   const serialized = JSON.stringify(views);
-  writes = writes.then(() => AsyncStorage.setItem(STORAGE_KEY, serialized)).catch(() => {
+  const write = writes.then(() => AsyncStorage.setItem(STORAGE_KEY, serialized));
+  writes = write.catch(() => {}); // A failed write must not block later saves.
+  return write;
+}
+
+export function flushSessionViews(): void {
+  void persistSessionViews().catch(() => {
     console.warn("MyPi: session drafts could not be saved to local storage");
   });
 }

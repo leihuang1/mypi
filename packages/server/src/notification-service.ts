@@ -66,7 +66,7 @@ export class NotificationService {
     const timer = this.timers.get(sessionId);
     if (timer) clearTimeout(timer);
     this.timers.delete(sessionId);
-    if (next.pending && !next.running && !next.queued) {
+    if (next.pending && !next.running && (!next.queued || next.pending.kind === "error")) {
       this.timers.set(sessionId, setTimeout(() => {
         this.timers.delete(sessionId);
         try { this.publish(sessionId); }
@@ -78,7 +78,7 @@ export class NotificationService {
   private publish(sessionId: string): void {
     const state = this.data.sessions[sessionId];
     const notice = state?.pending;
-    if (!notice || state.running || state.queued || this.closed) return;
+    if (!notice || state.running || (state.queued && notice.kind !== "error") || this.closed) return;
     const handled = this.data.handled[sessionId] ?? [];
     const duplicate = !notice.id || handled.includes(notice.id);
     const name = this.sessionName(sessionId);
