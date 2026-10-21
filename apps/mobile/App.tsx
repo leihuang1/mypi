@@ -1,8 +1,10 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import {
   ActivityIndicator,
+  Alert,
   Platform,
   Pressable,
+  RefreshControl,
   SafeAreaView,
   ScrollView,
   StatusBar,
@@ -28,12 +30,8 @@ import {
   saveServerProfile,
   setActiveServerId,
 } from "./src/store/server-store";
+import { colors, font, MONO_FONT, radius, space, touch } from "./src/theme";
 
-const MONO_FONT = Platform.select({
-  ios: "Menlo",
-  android: "monospace",
-  default: "monospace",
-});
 
 export default function App() {
   const [servers, setServers] = useState<SavedServerProfile[]>([]);
@@ -202,6 +200,17 @@ export default function App() {
     }
   };
 
+  const confirmArchiveSession = (sess: SessionSummary) => {
+    Alert.alert(
+      "Archive session?",
+      `"${sess.name}" will be removed from this list.`,
+      [
+        { text: "Cancel", style: "cancel" },
+        { text: "Archive", style: "destructive", onPress: () => void handleDeleteSession(sess.id) },
+      ],
+    );
+  };
+
   const currentNavEpoch = navEpochRef.current;
 
   const handleSessionCreated = (created: SessionSummary) => {
@@ -245,7 +254,7 @@ export default function App() {
 
   return (
     <SafeAreaView style={styles.safeArea}>
-      <StatusBar barStyle="light-content" backgroundColor="#0b0e14" />
+      <StatusBar barStyle="light-content" backgroundColor={colors.bg} />
 
       {screen === "pair" || !client ? (
         <PairServerScreen
@@ -278,47 +287,40 @@ export default function App() {
         />
       ) : (
         <View style={styles.hubContainer}>
-          {/* Header */}
           <View style={styles.hubHeader}>
-            <View style={styles.hubHeaderLeft}>
+            <Pressable
+              style={styles.hubHeaderLeft}
+              onPress={() => navigateToScreen("pair")}
+              accessibilityRole="button"
+              accessibilityLabel="Manage servers"
+            >
               <Text style={styles.brandTitle} numberOfLines={1}>
-                MyPi Durable
+                MyPi
               </Text>
-              <Text
-                style={styles.serverSubtitle}
-                numberOfLines={1}
-                ellipsizeMode="tail"
-              >
-                {activeServer?.name} • {device?.platform || activeServer?.url}
-              </Text>
-            </View>
-            <View style={styles.headerActions}>
-              <Pressable
-                style={styles.serverBtn}
-                onPress={() => navigateToScreen("pair")}
-              >
-                <Text style={styles.serverBtnText}>⚙ Server</Text>
-              </Pressable>
-              <Pressable
-                style={[styles.newBtn, !device ? styles.btnDisabled : null]}
-                onPress={() => device && navigateToScreen("new-session")}
-                disabled={!device}
-              >
-                <Text style={styles.newBtnText}>+ New</Text>
-              </Pressable>
-            </View>
-          </View>
-
-          <View style={styles.notificationRow}>
-            <View style={{ flex: 1 }}>
-              <Text style={styles.notificationTitle}>后台监听与通知</Text>
-              <Text style={styles.notificationHint}>{notifications.hint}</Text>
-            </View>
-            <Pressable onPress={notifications.toggle} disabled={notifications.busy || !notifications.supported} style={styles.serverBtn} accessibilityRole="switch" accessibilityLabel="后台监听与本地通知" accessibilityState={{ checked: notifications.running, disabled: notifications.busy || !notifications.supported }}>
-              <Text style={styles.serverBtnText}>{!notifications.supported ? (Platform.OS === "android" ? "需原生版" : "仅 Android") : notifications.busy ? "更新中…" : notifications.running ? "已开启" : notifications.enabled ? "恢复" : "开启"}</Text>
+              <View style={styles.serverLine}>
+                <View
+                  style={[
+                    styles.serverDot,
+                    { backgroundColor: error ? colors.danger : device ? colors.success : colors.textFaint },
+                  ]}
+                />
+                <Text style={styles.serverSubtitle} numberOfLines={1}>
+                  {activeServer?.name}
+                  {device?.hostname ? ` · ${device.hostname}` : ""}
+                </Text>
+                <Text style={styles.serverChevron}>›</Text>
+              </View>
+            </Pressable>
+            <Pressable
+              style={[styles.newBtn, !device ? styles.btnDisabled : null]}
+              onPress={() => device && navigateToScreen("new-session")}
+              disabled={!device}
+              accessibilityRole="button"
+              accessibilityLabel="New session"
+            >
+              <Text style={styles.newBtnText}>+ New</Text>
             </Pressable>
           </View>
-          {notifications.error && <Text style={styles.notificationError}>{notifications.error}</Text>}
 
           {error && (
             <View style={styles.errorCard}>
@@ -332,38 +334,67 @@ export default function App() {
           <ScrollView
             style={styles.sessionList}
             contentContainerStyle={styles.sessionListContent}
+            refreshControl={
+              <RefreshControl
+                refreshing={loading && sessions.length > 0}
+                onRefresh={refreshHub}
+                tintColor={colors.accent}
+                colors={[colors.accent]}
+                progressBackgroundColor={colors.surface}
+              />
+            }
           >
-            <View style={styles.sectionHeader}>
-              <Text style={styles.sectionTitle}>
-                DURABLE SESSIONS ({sessions.length})
-              </Text>
-              <Pressable onPress={refreshHub}>
-                <Text style={styles.refreshLink}>
-                  {loading ? "Loading..." : "↻ Refresh"}
+            <Pressable
+              onPress={notifications.toggle}
+              disabled={notifications.busy || !notifications.supported}
+              style={styles.notificationCard}
+              accessibilityRole="switch"
+              accessibilityLabel="后台监听与本地通知"
+              accessibilityState={{ checked: notifications.running, disabled: notifications.busy || !notifications.supported }}
+            >
+              <View style={styles.notificationTextCol}>
+                <Text style={styles.notificationTitle}>后台监听与通知</Text>
+                <Text style={styles.notificationHint}>{notifications.hint}</Text>
+              </View>
+              {!notifications.supported ? (
+                <Text style={styles.notificationUnsupported}>
+                  {Platform.OS === "android" ? "需原生版" : "仅 Android"}
                 </Text>
-              </Pressable>
+              ) : notifications.busy ? (
+                <ActivityIndicator color={colors.accent} size="small" />
+              ) : (
+                <View style={[styles.switchTrack, notifications.running ? styles.switchTrackOn : null]}>
+                  <View style={[styles.switchThumb, notifications.running ? styles.switchThumbOn : null]} />
+                </View>
+              )}
+            </Pressable>
+            {notifications.error && <Text style={styles.notificationError}>{notifications.error}</Text>}
+
+            <View style={styles.sectionHeader}>
+              <Text style={styles.sectionTitle}>Sessions</Text>
+              <Text style={styles.sectionCount}>
+                {loading && sessions.length === 0 ? "" : sessions.length}
+              </Text>
             </View>
 
             {loading && sessions.length === 0 ? (
               <ActivityIndicator
-                color="#60a5fa"
+                color={colors.accent}
                 style={{ marginTop: 40 }}
                 size="large"
               />
             ) : sessions.length === 0 ? (
               <View style={styles.emptyBox}>
-                <Text style={styles.emptyTitle}>No Durable Sessions Yet</Text>
+                <Text style={styles.emptyTitle}>No sessions yet</Text>
                 <Text style={styles.emptySubtitle}>
-                  Tap "+ New" to pick a project folder on {device?.hostname || "your dev machine"} and start coding from your phone.
+                  Pick a project folder on {device?.hostname || "your dev machine"} and start coding from your phone.
                 </Text>
                 {device && (
                   <Pressable
                     style={styles.primaryCta}
                     onPress={() => navigateToScreen("new-session")}
                   >
-                    <Text style={styles.primaryCtaText}>
-                      + Create First Session
-                    </Text>
+                    <Text style={styles.primaryCtaText}>Create first session</Text>
                   </Pressable>
                 )}
               </View>
@@ -371,45 +402,50 @@ export default function App() {
               sessions.map((sess) => (
                 <Pressable
                   key={sess.id}
-                  style={styles.sessionCard}
+                  style={({ pressed }) => [styles.sessionCard, pressed ? styles.sessionCardPressed : null]}
                   onPress={() => {
                     setActiveSession(sess);
                     navigateToScreen("session-detail");
                   }}
+                  onLongPress={() => confirmArchiveSession(sess)}
                 >
                   <View style={styles.sessionCardTop}>
-                    <View style={styles.sessionTitleRow}>
+                    <Text style={styles.sessionName} numberOfLines={1}>
+                      {sess.name}
+                    </Text>
+                    <View style={[styles.statusChip, sess.busy ? styles.statusChipBusy : null]}>
                       <View
                         style={[
                           styles.busyDot,
-                          {
-                            backgroundColor: sess.busy ? "#f59e0b" : "#10b981",
-                          },
+                          { backgroundColor: sess.busy ? colors.warning : colors.success },
                         ]}
                       />
-                      <Text style={styles.sessionName} numberOfLines={1}>
-                        {sess.name}
+                      <Text style={[styles.statusChipText, sess.busy ? { color: colors.warning } : null]}>
+                        {sess.busy ? "Running" : "Idle"}
                       </Text>
                     </View>
-                    <Pressable
-                      onPress={() => handleDeleteSession(sess.id)}
-                      style={styles.archiveBtn}
-                    >
-                      <Text style={styles.archiveBtnText}>Archive</Text>
-                    </Pressable>
                   </View>
 
-                  <Text style={styles.sessionCwd} numberOfLines={1}>
-                    📁 {sess.cwd}
+                  <Text style={styles.sessionCwd} numberOfLines={1} ellipsizeMode="head">
+                    {sess.cwd}
                   </Text>
 
                   <View style={styles.sessionMetaRow}>
-                    <Text style={styles.sessionModelBadge}>
-                      {sess.model.provider}/{sess.model.modelId} ({sess.thinkingLevel})
+                    <Text style={styles.sessionModelBadge} numberOfLines={1}>
+                      {sess.model.modelId} · {sess.thinkingLevel}
                     </Text>
                     <Text style={styles.sessionEntriesText}>
-                      {sess.busy ? "● Running" : `${sess.entryCount} entries`}
+                      {sess.entryCount} entries
                     </Text>
+                    <Pressable
+                      onPress={() => confirmArchiveSession(sess)}
+                      style={styles.archiveBtn}
+                      hitSlop={8}
+                      accessibilityRole="button"
+                      accessibilityLabel={`Archive ${sess.name}`}
+                    >
+                      <Text style={styles.archiveBtnText}>Archive</Text>
+                    </Pressable>
                   </View>
                 </Pressable>
               ))
@@ -422,221 +458,278 @@ export default function App() {
 }
 
 const styles = StyleSheet.create({
-  notificationRow: { flexDirection: "row", alignItems: "center", paddingHorizontal: 16, paddingVertical: 12, gap: 12, borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: "#262d3d" },
-  notificationTitle: { color: "#cbd5e1", fontSize: 12, marginBottom: 4 },
-  notificationHint: { color: "#94a3b8", fontSize: 10 },
-  notificationError: { color: "#fbbf24", fontSize: 12, paddingHorizontal: 16, paddingTop: 10 },
   safeArea: {
     flex: 1,
-    backgroundColor: "#0b0e14",
+    backgroundColor: colors.bg,
   },
   hubContainer: {
     flex: 1,
-    backgroundColor: "#0b0e14",
+    backgroundColor: colors.bg,
   },
   hubHeader: {
     flexDirection: "row",
-    justifyContent: "space-between",
     alignItems: "center",
-    paddingHorizontal: 16,
-    paddingVertical: 14,
-    backgroundColor: "#141821",
-    borderBottomWidth: 1,
-    borderBottomColor: "#262d3d",
-    gap: 12,
+    paddingHorizontal: space.lg,
+    paddingTop: space.lg,
+    paddingBottom: space.md,
+    gap: space.md,
   },
   hubHeaderLeft: {
     flex: 1,
     minWidth: 0,
+    gap: 2,
   },
   brandTitle: {
-    color: "#f9fafb",
-    fontSize: 20,
-    fontWeight: "800",
-  },
-  serverSubtitle: {
-    color: "#9ca3af",
-    fontFamily: MONO_FONT,
-    fontSize: 11,
-    marginTop: 2,
-  },
-  headerActions: {
-    flexDirection: "row",
-    alignItems: "center",
-    flexShrink: 0,
-    gap: 8,
-  },
-  serverBtn: {
-    backgroundColor: "#1f2937",
-    paddingHorizontal: 12,
-    paddingVertical: 8,
-    borderRadius: 8,
-    borderWidth: 1,
-    borderColor: "#374151",
-  },
-  serverBtnText: {
-    color: "#e5e7eb",
-    fontSize: 13,
-    fontWeight: "600",
-  },
-  newBtn: {
-    backgroundColor: "#2563eb",
-    paddingHorizontal: 14,
-    paddingVertical: 8,
-    borderRadius: 8,
-  },
-  newBtnText: {
-    color: "#ffffff",
-    fontSize: 13,
+    color: colors.text,
+    fontSize: font.heading,
     fontWeight: "700",
   },
+  serverLine: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 6,
+    minHeight: 24,
+  },
+  serverDot: {
+    width: 8,
+    height: 8,
+    borderRadius: 4,
+  },
+  serverSubtitle: {
+    flexShrink: 1,
+    color: colors.textMuted,
+    fontSize: font.small,
+  },
+  serverChevron: {
+    color: colors.textFaint,
+    fontSize: font.title,
+  },
+  newBtn: {
+    minHeight: touch,
+    justifyContent: "center",
+    backgroundColor: colors.accent,
+    paddingHorizontal: space.lg,
+    borderRadius: radius.pill,
+  },
+  newBtnText: {
+    color: colors.onAccent,
+    fontSize: font.body,
+    fontWeight: "600",
+  },
   btnDisabled: {
-    opacity: 0.5,
+    opacity: 0.45,
   },
   errorCard: {
-    margin: 14,
-    padding: 12,
-    backgroundColor: "#451a1a",
-    borderRadius: 8,
+    marginHorizontal: space.lg,
+    marginBottom: space.sm,
+    padding: space.md,
+    backgroundColor: colors.dangerSoft,
+    borderRadius: radius.md,
     flexDirection: "row",
     alignItems: "center",
     justifyContent: "space-between",
-    gap: 10,
+    gap: space.md,
   },
   errorText: {
     flex: 1,
-    color: "#fca5a5",
-    fontSize: 12,
+    color: colors.dangerText,
+    fontSize: font.small,
+    lineHeight: 19,
   },
   retryBtn: {
-    backgroundColor: "#7f1d1d",
-    paddingHorizontal: 12,
-    paddingVertical: 6,
-    borderRadius: 6,
+    minHeight: 36,
+    justifyContent: "center",
+    paddingHorizontal: space.md,
+    borderRadius: radius.sm,
+    backgroundColor: colors.surfaceRaised,
   },
   retryBtnText: {
-    color: "#ffffff",
-    fontSize: 12,
+    color: colors.text,
+    fontSize: font.small,
     fontWeight: "600",
   },
   sessionList: {
     flex: 1,
   },
   sessionListContent: {
-    padding: 16,
-    gap: 12,
-    paddingBottom: 40,
+    paddingHorizontal: space.lg,
+    paddingTop: space.xs,
+    paddingBottom: 48,
+    gap: space.md,
+  },
+  notificationCard: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: space.md,
+    padding: space.md,
+    paddingHorizontal: space.lg,
+    minHeight: 64,
+    backgroundColor: colors.surface,
+    borderRadius: radius.md,
+  },
+  notificationTextCol: {
+    flex: 1,
+    gap: 3,
+  },
+  notificationTitle: {
+    color: colors.text,
+    fontSize: font.body,
+    fontWeight: "500",
+  },
+  notificationHint: {
+    color: colors.textMuted,
+    fontSize: font.caption,
+    lineHeight: 17,
+  },
+  notificationUnsupported: {
+    color: colors.textFaint,
+    fontSize: font.caption,
+  },
+  notificationError: {
+    color: colors.warning,
+    fontSize: font.small,
+    lineHeight: 19,
+    marginTop: -space.xs,
+  },
+  switchTrack: {
+    width: 44,
+    height: 26,
+    borderRadius: 13,
+    padding: 3,
+    backgroundColor: colors.borderStrong,
+  },
+  switchTrackOn: {
+    backgroundColor: colors.accent,
+  },
+  switchThumb: {
+    width: 20,
+    height: 20,
+    borderRadius: 10,
+    backgroundColor: colors.text,
+  },
+  switchThumbOn: {
+    transform: [{ translateX: 18 }],
+    backgroundColor: colors.onAccent,
   },
   sectionHeader: {
     flexDirection: "row",
-    justifyContent: "space-between",
-    alignItems: "center",
+    alignItems: "baseline",
+    gap: space.sm,
+    marginTop: space.sm,
   },
   sectionTitle: {
-    color: "#60a5fa",
-    fontSize: 11,
-    fontWeight: "700",
-    letterSpacing: 0.8,
-  },
-  refreshLink: {
-    color: "#93c5fd",
-    fontSize: 12,
+    color: colors.text,
+    fontSize: font.title,
     fontWeight: "600",
   },
+  sectionCount: {
+    color: colors.textFaint,
+    fontSize: font.small,
+  },
   emptyBox: {
-    marginTop: 32,
-    padding: 24,
-    backgroundColor: "#141821",
-    borderRadius: 12,
-    borderWidth: 1,
-    borderColor: "#262d3d",
+    marginTop: space.lg,
+    padding: space.xl,
+    backgroundColor: colors.surface,
+    borderRadius: radius.lg,
     alignItems: "center",
-    gap: 10,
+    gap: space.sm,
   },
   emptyTitle: {
-    color: "#f9fafb",
-    fontSize: 16,
-    fontWeight: "700",
+    color: colors.text,
+    fontSize: font.title,
+    fontWeight: "600",
   },
   emptySubtitle: {
-    color: "#9ca3af",
-    fontSize: 13,
+    color: colors.textMuted,
+    fontSize: font.small,
     textAlign: "center",
-    lineHeight: 19,
+    lineHeight: 20,
   },
   primaryCta: {
-    marginTop: 6,
-    backgroundColor: "#2563eb",
-    paddingHorizontal: 18,
-    paddingVertical: 10,
-    borderRadius: 8,
+    marginTop: space.sm,
+    minHeight: touch,
+    justifyContent: "center",
+    backgroundColor: colors.accent,
+    paddingHorizontal: space.xl,
+    borderRadius: radius.pill,
   },
   primaryCtaText: {
-    color: "#ffffff",
-    fontSize: 14,
-    fontWeight: "700",
+    color: colors.onAccent,
+    fontSize: font.body,
+    fontWeight: "600",
   },
   sessionCard: {
-    backgroundColor: "#141821",
-    borderRadius: 10,
-    borderWidth: 1,
-    borderColor: "#262d3d",
-    padding: 14,
-    gap: 8,
+    backgroundColor: colors.surface,
+    borderRadius: radius.md,
+    paddingHorizontal: space.lg,
+    paddingTop: space.md,
+    paddingBottom: space.xs,
+    gap: 6,
+  },
+  sessionCardPressed: {
+    backgroundColor: colors.surfaceRaised,
   },
   sessionCardTop: {
     flexDirection: "row",
-    justifyContent: "space-between",
     alignItems: "center",
-    gap: 8,
-  },
-  sessionTitleRow: {
-    flex: 1,
-    flexDirection: "row",
-    alignItems: "center",
-    gap: 8,
-  },
-  busyDot: {
-    width: 8,
-    height: 8,
-    borderRadius: 4,
+    gap: space.sm,
   },
   sessionName: {
     flex: 1,
-    color: "#f9fafb",
-    fontSize: 15,
-    fontWeight: "700",
-  },
-  archiveBtn: {
-    paddingHorizontal: 8,
-    paddingVertical: 4,
-    borderRadius: 5,
-    backgroundColor: "#1f2937",
-  },
-  archiveBtnText: {
-    color: "#9ca3af",
-    fontSize: 11,
+    color: colors.text,
+    fontSize: font.title,
     fontWeight: "600",
   },
+  statusChip: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 5,
+    paddingHorizontal: space.sm,
+    paddingVertical: 3,
+    borderRadius: radius.pill,
+    backgroundColor: colors.successSoft,
+  },
+  statusChipBusy: {
+    backgroundColor: colors.warningSoft,
+  },
+  statusChipText: {
+    color: colors.success,
+    fontSize: font.caption,
+    fontWeight: "500",
+  },
+  busyDot: {
+    width: 6,
+    height: 6,
+    borderRadius: 3,
+  },
   sessionCwd: {
-    color: "#9ca3af",
+    color: colors.textMuted,
     fontFamily: MONO_FONT,
-    fontSize: 12,
+    fontSize: font.caption,
   },
   sessionMetaRow: {
     flexDirection: "row",
-    justifyContent: "space-between",
     alignItems: "center",
-    marginTop: 2,
+    gap: space.md,
   },
   sessionModelBadge: {
-    color: "#93c5fd",
-    fontFamily: MONO_FONT,
-    fontSize: 11,
+    flexShrink: 1,
+    color: colors.accentText,
+    fontSize: font.caption,
   },
   sessionEntriesText: {
-    color: "#6b7280",
-    fontFamily: MONO_FONT,
-    fontSize: 11,
+    flex: 1,
+    color: colors.textFaint,
+    fontSize: font.caption,
+  },
+  archiveBtn: {
+    minHeight: 40,
+    justifyContent: "center",
+    paddingLeft: space.md,
+  },
+  archiveBtnText: {
+    color: colors.textFaint,
+    fontSize: font.caption,
+    fontWeight: "500",
   },
 });

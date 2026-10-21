@@ -1,7 +1,6 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import {
   ActivityIndicator,
-  Platform,
   Pressable,
   ScrollView,
   StyleSheet,
@@ -14,12 +13,7 @@ import type {
   FilePreviewResponse,
   MyPiClient,
 } from "@mypi/shared";
-
-const MONO_FONT = Platform.select({
-  ios: "Menlo",
-  android: "monospace",
-  default: "monospace",
-});
+import { colors, font, MONO_FONT, radius, space, touch } from "../theme";
 
 function formatBytes(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`;
@@ -85,6 +79,7 @@ export function FileBrowserPanel({
   const [loadingFile, setLoadingFile] = useState(false);
 
   // Sequence numbers to prevent out-of-order responses from overwriting latest selection
+  const breadcrumbRef = useRef<ScrollView>(null);
   const dirReqIdRef = useRef(0);
   const previewReqIdRef = useRef(0);
 
@@ -267,12 +262,13 @@ export function FileBrowserPanel({
       {/* Current Path Header + Bookmark + Direct Jump */}
       <View style={styles.pathBar}>
         <View style={styles.pathTopRow}>
-          <Text style={styles.pathBadge}>PATH</Text>
           <ScrollView
             horizontal
             showsHorizontalScrollIndicator={false}
             style={styles.breadcrumbScroll}
             contentContainerStyle={styles.breadcrumbRow}
+            ref={breadcrumbRef}
+            onContentSizeChange={() => breadcrumbRef.current?.scrollToEnd({ animated: false })}
           >
             {breadcrumbs.map((bc, idx) => (
               <React.Fragment key={bc.path}>
@@ -296,8 +292,9 @@ export function FileBrowserPanel({
               styles.iconBtn,
               isBookmarked ? styles.iconBtnBookmarked : null,
             ]}
+            accessibilityLabel={isBookmarked ? "Remove bookmark" : "Bookmark this folder"}
           >
-            <Text style={styles.iconBtnText}>{isBookmarked ? "★" : "☆"}</Text>
+            <Text style={[styles.iconBtnText, isBookmarked ? styles.iconBtnTextBookmarked : null]}>{isBookmarked ? "★" : "☆"}</Text>
           </Pressable>
 
           <Pressable
@@ -306,8 +303,9 @@ export function FileBrowserPanel({
               setShowPathInput((prev) => !prev);
             }}
             style={styles.iconBtn}
+            accessibilityLabel="Go to path"
           >
-            <Text style={styles.iconBtnText}>✎ Jump</Text>
+            <Text style={styles.iconBtnText}>✎</Text>
           </Pressable>
         </View>
 
@@ -318,7 +316,7 @@ export function FileBrowserPanel({
               value={pathInputValue}
               onChangeText={setPathInputValue}
               placeholder="Enter path (e.g. ~/code/project)"
-              placeholderTextColor="#6b7280"
+              placeholderTextColor={colors.textFaint}
               autoCapitalize="none"
               autoCorrect={false}
               onSubmitEditing={handleJumpPath}
@@ -334,7 +332,7 @@ export function FileBrowserPanel({
           <View style={styles.cwdBannerRow}>
             {sessionCwd === currentPath ? (
               <Text style={styles.cwdActiveBadge} numberOfLines={1}>
-                ✓ Active Session CWD
+                ✓ Session folder
               </Text>
             ) : (
               <Pressable
@@ -342,7 +340,7 @@ export function FileBrowserPanel({
                 onPress={() => onSetSessionCwd(currentPath)}
               >
                 <Text style={styles.setCwdBtnText} numberOfLines={1}>
-                  📌 Set "{currentPath.split("/").pop() || "/"}" as CWD
+                  Use "{currentPath.split("/").pop() || "/"}" as session folder
                 </Text>
               </Pressable>
             )}
@@ -376,7 +374,7 @@ export function FileBrowserPanel({
                 void loadDir(listing.parent!);
               }}
             >
-              <Text style={styles.upChipText}>⬆ Parent</Text>
+              <Text style={styles.upChipText}>‹ Parent</Text>
             </Pressable>
           )}
           {quickBookmarks.map((b) => (
@@ -423,8 +421,8 @@ export function FileBrowserPanel({
           placeholder={`Filter ${
             (listing?.dirs.length ?? 0) +
             (showFiles ? (listing?.files?.length ?? 0) : 0)
-          } items...`}
-          placeholderTextColor="#6b7280"
+          } items`}
+          placeholderTextColor={colors.textFaint}
           value={searchQuery}
           onChangeText={setSearchQuery}
           autoCapitalize="none"
@@ -455,7 +453,7 @@ export function FileBrowserPanel({
             setActiveAction((prev) => (prev === "mkdir" ? null : "mkdir"))
           }
         >
-          <Text style={styles.toolBtnText}>+ Folder</Text>
+          <Text style={styles.toolBtnText}>New</Text>
         </Pressable>
         <Pressable
           style={[
@@ -466,7 +464,7 @@ export function FileBrowserPanel({
             setActiveAction((prev) => (prev === "clone" ? null : "clone"))
           }
         >
-          <Text style={styles.toolBtnText}>⬇ Clone</Text>
+          <Text style={styles.toolBtnText}>Clone</Text>
         </Pressable>
       </View>
 
@@ -474,12 +472,12 @@ export function FileBrowserPanel({
       {activeAction === "mkdir" && (
         <View style={styles.actionCard}>
           <Text style={styles.actionTitle}>
-            Create New Directory in {currentPath.split("/").pop() || "/"}
+            New folder in {currentPath.split("/").pop() || "/"}
           </Text>
           <TextInput
             style={styles.actionInput}
             placeholder="Folder name (e.g. my-new-app)"
-            placeholderTextColor="#6b7280"
+            placeholderTextColor={colors.textFaint}
             value={newDirName}
             onChangeText={setNewDirName}
             autoCapitalize="none"
@@ -491,7 +489,7 @@ export function FileBrowserPanel({
               onPress={() => setNewDirGitInit((prev) => !prev)}
             >
               <Text style={styles.checkboxText}>
-                {newDirGitInit ? "☑" : "☐"} Initialize Git repo (git init)
+                {newDirGitInit ? "☑" : "☐"} Initialize Git repo
               </Text>
             </Pressable>
             <Pressable
@@ -503,7 +501,7 @@ export function FileBrowserPanel({
               disabled={!newDirName.trim() || actionBusy}
             >
               <Text style={styles.actionSubmitText}>
-                {actionBusy ? "Creating..." : "Create"}
+                {actionBusy ? "Creating…" : "Create"}
               </Text>
             </Pressable>
           </View>
@@ -514,12 +512,12 @@ export function FileBrowserPanel({
       {activeAction === "clone" && (
         <View style={styles.actionCard}>
           <Text style={styles.actionTitle}>
-            Git Clone into {currentPath.split("/").pop() || "/"}
+            Clone into {currentPath.split("/").pop() || "/"}
           </Text>
           <TextInput
             style={styles.actionInput}
             placeholder="Repository URL (https://... or git@...)"
-            placeholderTextColor="#6b7280"
+            placeholderTextColor={colors.textFaint}
             value={cloneRepoUrl}
             onChangeText={setCloneRepoUrl}
             autoCapitalize="none"
@@ -529,7 +527,7 @@ export function FileBrowserPanel({
             <TextInput
               style={[styles.actionInput, { flex: 1 }]}
               placeholder="Optional target folder name"
-              placeholderTextColor="#6b7280"
+              placeholderTextColor={colors.textFaint}
               value={cloneFolderName}
               onChangeText={setCloneFolderName}
               autoCapitalize="none"
@@ -544,7 +542,7 @@ export function FileBrowserPanel({
               disabled={!cloneRepoUrl.trim() || actionBusy}
             >
               <Text style={styles.actionSubmitText}>
-                {actionBusy ? "Cloning..." : "Clone"}
+                {actionBusy ? "Cloning…" : "Clone"}
               </Text>
             </Pressable>
           </View>
@@ -556,15 +554,15 @@ export function FileBrowserPanel({
       {/* File Content Preview Card */}
       {loadingFile ? (
         <View style={styles.previewCard}>
-          <ActivityIndicator color="#60a5fa" size="small" />
-          <Text style={styles.previewMeta}>Reading file preview...</Text>
+          <ActivityIndicator color={colors.accent} size="small" />
+          <Text style={styles.previewMeta}>Loading preview…</Text>
         </View>
       ) : previewFile ? (
         <View style={styles.previewCard}>
           <View style={styles.previewHeader}>
             <View style={{ flex: 1, minWidth: 0 }}>
               <Text style={styles.previewTitle} numberOfLines={1}>
-                📄 {previewFile.name}
+                {previewFile.name}
               </Text>
               <Text style={styles.previewMeta} numberOfLines={1}>
                 {formatBytes(previewFile.size)}
@@ -576,14 +574,14 @@ export function FileBrowserPanel({
                 style={styles.mentionChip}
                 onPress={() => triggerMention(previewFile.path, false)}
               >
-                <Text style={styles.mentionChipText}>@ Mention in Chat</Text>
+                <Text style={styles.mentionChipText}>@ Mention</Text>
               </Pressable>
             )}
             <Pressable
               style={styles.closePreviewBtn}
               onPress={() => clearPreviewState()}
             >
-              <Text style={styles.closePreviewText}>✕ Close</Text>
+              <Text style={styles.closePreviewText}>✕</Text>
             </Pressable>
           </View>
           {previewFile.isBinary ? (
@@ -605,7 +603,7 @@ export function FileBrowserPanel({
 
       {/* Directory & File List */}
       {loading ? (
-        <ActivityIndicator color="#60a5fa" style={{ marginVertical: 18 }} />
+        <ActivityIndicator color={colors.accent} style={{ marginVertical: 18 }} />
       ) : (
         <ScrollView
           style={fullHeight ? styles.entriesScrollFull : styles.entriesScroll}
@@ -627,7 +625,7 @@ export function FileBrowserPanel({
                 <Text style={styles.dirName} numberOfLines={1}>
                   {d.name}
                 </Text>
-                {d.isGitRepo && <Text style={styles.gitBadge}>GIT</Text>}
+                {d.isGitRepo && <Text style={styles.gitBadge}>git</Text>}
               </Pressable>
               {onMentionPath && (
                 <Pressable
@@ -679,34 +677,21 @@ export function FileBrowserPanel({
 
 const styles = StyleSheet.create({
   wrapper: {
-    gap: 8,
+    gap: space.sm,
   },
   wrapperFull: {
     flex: 1,
   },
   pathBar: {
-    backgroundColor: "#0b0e14",
-    borderRadius: 8,
-    borderWidth: 1,
-    borderColor: "#2e3646",
-    padding: 8,
-    gap: 8,
+    backgroundColor: colors.surface,
+    borderRadius: radius.md,
+    padding: space.sm,
+    gap: space.sm,
   },
   pathTopRow: {
     flexDirection: "row",
     alignItems: "center",
-    gap: 6,
-  },
-  pathBadge: {
-    flexShrink: 0,
-    color: "#60a5fa",
-    fontFamily: MONO_FONT,
-    fontSize: 10,
-    fontWeight: "700",
-    backgroundColor: "#172554",
-    paddingHorizontal: 6,
-    paddingVertical: 3,
-    borderRadius: 4,
+    gap: space.xs,
   },
   breadcrumbScroll: {
     flex: 1,
@@ -715,401 +700,388 @@ const styles = StyleSheet.create({
   breadcrumbRow: {
     flexDirection: "row",
     alignItems: "center",
-    gap: 3,
-    paddingRight: 8,
+    gap: 2,
+    paddingRight: space.sm,
   },
   breadcrumbSep: {
-    color: "#4b5563",
-    fontSize: 12,
+    color: colors.textFaint,
+    fontSize: font.small,
   },
   breadcrumbChip: {
+    minHeight: 36,
+    justifyContent: "center",
     paddingHorizontal: 6,
-    paddingVertical: 3,
-    backgroundColor: "#141821",
-    borderRadius: 5,
-    borderWidth: 1,
-    borderColor: "#1f2937",
+    borderRadius: radius.sm,
   },
   breadcrumbText: {
-    color: "#e5e7eb",
+    color: colors.text,
     fontFamily: MONO_FONT,
-    fontSize: 11,
+    fontSize: font.small,
   },
   iconBtn: {
     flexShrink: 0,
-    paddingHorizontal: 8,
-    paddingVertical: 4,
-    backgroundColor: "#1f2937",
-    borderRadius: 5,
+    width: 40,
+    height: 40,
+    alignItems: "center",
+    justifyContent: "center",
+    backgroundColor: colors.surfaceRaised,
+    borderRadius: radius.sm,
   },
   iconBtnBookmarked: {
-    backgroundColor: "#422006",
-    borderWidth: 1,
-    borderColor: "#f59e0b",
+    backgroundColor: colors.warningSoft,
   },
   iconBtnText: {
-    color: "#f3f4f6",
-    fontSize: 11,
-    fontWeight: "600",
+    color: colors.textMuted,
+    fontSize: font.title,
+  },
+  iconBtnTextBookmarked: {
+    color: colors.warning,
   },
   jumpInputRow: {
     flexDirection: "row",
-    gap: 6,
+    gap: space.sm,
   },
   jumpInput: {
     flex: 1,
     minWidth: 0,
-    backgroundColor: "#141821",
+    minHeight: touch,
+    backgroundColor: colors.surfaceSunken,
     borderWidth: 1,
-    borderColor: "#3b82f6",
-    borderRadius: 6,
-    paddingHorizontal: 10,
-    paddingVertical: 6,
-    color: "#f9fafb",
+    borderColor: colors.accent,
+    borderRadius: radius.sm,
+    paddingHorizontal: space.md,
+    color: colors.text,
     fontFamily: MONO_FONT,
-    fontSize: 12,
+    fontSize: font.small,
   },
   jumpGoBtn: {
     flexShrink: 0,
-    backgroundColor: "#2563eb",
-    paddingHorizontal: 14,
+    minHeight: touch,
+    backgroundColor: colors.accent,
+    paddingHorizontal: space.lg,
     justifyContent: "center",
-    borderRadius: 6,
+    borderRadius: radius.sm,
   },
   jumpGoBtnText: {
-    color: "#ffffff",
-    fontSize: 12,
-    fontWeight: "700",
+    color: colors.onAccent,
+    fontSize: font.small,
+    fontWeight: "600",
   },
   cwdBannerRow: {
     flexDirection: "row",
     alignItems: "center",
     justifyContent: "space-between",
-    gap: 8,
-    paddingTop: 4,
-    borderTopWidth: 1,
-    borderTopColor: "#1f2430",
+    gap: space.sm,
+    paddingTop: space.sm,
+    borderTopWidth: StyleSheet.hairlineWidth,
+    borderTopColor: colors.border,
   },
   cwdActiveBadge: {
     flex: 1,
     minWidth: 0,
-    color: "#34d399",
-    fontFamily: MONO_FONT,
-    fontSize: 11,
-    fontWeight: "600",
+    color: colors.success,
+    fontSize: font.small,
+    fontWeight: "500",
+    paddingHorizontal: space.xs,
   },
   setCwdBtn: {
     flexShrink: 1,
     minWidth: 0,
-    backgroundColor: "#1e3a8a",
-    paddingHorizontal: 10,
-    paddingVertical: 5,
-    borderRadius: 6,
-    borderWidth: 1,
-    borderColor: "#3b82f6",
+    minHeight: 36,
+    justifyContent: "center",
+    backgroundColor: colors.accentSoft,
+    paddingHorizontal: space.md,
+    borderRadius: radius.sm,
   },
   setCwdBtnText: {
-    color: "#dbeafe",
-    fontSize: 11,
-    fontWeight: "600",
+    color: colors.accentText,
+    fontSize: font.small,
+    fontWeight: "500",
   },
   mentionCwdBtn: {
     flexShrink: 0,
-    backgroundColor: "#1f2937",
-    paddingHorizontal: 8,
-    paddingVertical: 5,
-    borderRadius: 6,
+    minHeight: 36,
+    justifyContent: "center",
+    backgroundColor: colors.surfaceRaised,
+    paddingHorizontal: space.md,
+    borderRadius: radius.sm,
   },
   mentionCwdBtnText: {
-    color: "#93c5fd",
-    fontFamily: MONO_FONT,
-    fontSize: 11,
-    fontWeight: "600",
+    color: colors.accentText,
+    fontSize: font.small,
+    fontWeight: "500",
   },
   quickScroll: {
     flexGrow: 0,
   },
   quickRow: {
-    gap: 6,
+    gap: space.sm,
     paddingVertical: 2,
     alignItems: "center",
   },
   upChip: {
-    backgroundColor: "#1e293b",
-    paddingHorizontal: 9,
-    paddingVertical: 5,
-    borderRadius: 6,
+    minHeight: 34,
+    justifyContent: "center",
+    backgroundColor: colors.surfaceRaised,
+    paddingHorizontal: space.md,
+    borderRadius: radius.pill,
   },
   upChipText: {
-    color: "#93c5fd",
-    fontSize: 11,
-    fontWeight: "600",
+    color: colors.accentText,
+    fontSize: font.small,
+    fontWeight: "500",
   },
   bookmarkChip: {
-    backgroundColor: "#271a07",
+    minHeight: 34,
+    justifyContent: "center",
+    backgroundColor: colors.warningSoft,
     borderWidth: 1,
-    borderColor: "#92400e",
-    paddingHorizontal: 9,
-    paddingVertical: 5,
-    borderRadius: 6,
+    borderColor: "transparent",
+    paddingHorizontal: space.md,
+    borderRadius: radius.pill,
   },
   bookmarkChipText: {
-    color: "#fcd34d",
-    fontFamily: MONO_FONT,
-    fontSize: 11,
+    color: colors.warning,
+    fontSize: font.small,
   },
   recentChip: {
-    backgroundColor: "#111827",
+    minHeight: 34,
+    justifyContent: "center",
+    backgroundColor: colors.surface,
     borderWidth: 1,
-    borderColor: "#374151",
-    paddingHorizontal: 9,
-    paddingVertical: 5,
-    borderRadius: 6,
+    borderColor: "transparent",
+    paddingHorizontal: space.md,
+    borderRadius: radius.pill,
   },
   recentChipText: {
-    color: "#9ca3af",
-    fontFamily: MONO_FONT,
-    fontSize: 11,
+    color: colors.textMuted,
+    fontSize: font.small,
   },
   chipActive: {
-    borderColor: "#60a5fa",
+    borderColor: colors.accent,
   },
   toolbarRow: {
     flexDirection: "row",
     alignItems: "center",
-    gap: 6,
+    gap: space.sm,
   },
   filterInput: {
     flex: 1,
     minWidth: 0,
-    backgroundColor: "#0b0e14",
-    borderWidth: 1,
-    borderColor: "#262d3d",
-    borderRadius: 6,
-    paddingHorizontal: 10,
-    paddingVertical: 6,
-    color: "#f3f4f6",
-    fontSize: 12,
+    minHeight: 40,
+    backgroundColor: colors.surface,
+    borderRadius: radius.sm,
+    paddingHorizontal: space.md,
+    paddingVertical: space.sm,
+    color: colors.text,
+    fontSize: font.small,
   },
   toolBtn: {
     flexShrink: 0,
-    backgroundColor: "#1f2937",
-    paddingHorizontal: 9,
-    paddingVertical: 6,
-    borderRadius: 6,
+    minHeight: 40,
+    justifyContent: "center",
+    backgroundColor: colors.surface,
+    paddingHorizontal: space.md,
+    borderRadius: radius.sm,
     borderWidth: 1,
-    borderColor: "#374151",
+    borderColor: "transparent",
   },
   toolBtnActive: {
-    backgroundColor: "#1e3a8a",
-    borderColor: "#60a5fa",
+    backgroundColor: colors.accentSoft,
+    borderColor: colors.accent,
   },
   toolBtnText: {
-    color: "#d1d5db",
-    fontSize: 11,
-    fontWeight: "600",
+    color: colors.textMuted,
+    fontSize: font.small,
+    fontWeight: "500",
   },
   toolBtnTextActive: {
-    color: "#ffffff",
+    color: colors.text,
   },
   actionCard: {
-    backgroundColor: "#0d1017",
-    borderRadius: 8,
-    borderWidth: 1,
-    borderColor: "#3b82f6",
-    padding: 10,
-    gap: 8,
+    backgroundColor: colors.surface,
+    borderRadius: radius.md,
+    padding: space.md,
+    gap: space.md,
   },
   actionTitle: {
-    color: "#93c5fd",
-    fontSize: 12,
-    fontWeight: "700",
+    color: colors.text,
+    fontSize: font.small,
+    fontWeight: "600",
   },
   actionInput: {
-    backgroundColor: "#141821",
+    minHeight: touch,
+    backgroundColor: colors.surfaceSunken,
     borderWidth: 1,
-    borderColor: "#2e3646",
-    borderRadius: 6,
-    paddingHorizontal: 10,
-    paddingVertical: 7,
-    color: "#f9fafb",
+    borderColor: colors.border,
+    borderRadius: radius.sm,
+    paddingHorizontal: space.md,
+    color: colors.text,
     fontFamily: MONO_FONT,
-    fontSize: 12,
+    fontSize: font.small,
   },
   actionFooter: {
     flexDirection: "row",
     alignItems: "center",
     justifyContent: "space-between",
-    gap: 8,
+    gap: space.sm,
   },
   checkboxRow: {
     flex: 1,
-    paddingVertical: 4,
+    minHeight: 40,
+    justifyContent: "center",
   },
   checkboxText: {
-    color: "#d1d5db",
-    fontSize: 12,
+    color: colors.text,
+    fontSize: font.small,
   },
   actionSubmitBtn: {
-    backgroundColor: "#2563eb",
-    paddingHorizontal: 14,
-    paddingVertical: 8,
-    borderRadius: 6,
+    minHeight: 40,
+    justifyContent: "center",
+    backgroundColor: colors.accent,
+    paddingHorizontal: space.lg,
+    borderRadius: radius.sm,
   },
   actionSubmitText: {
-    color: "#ffffff",
-    fontSize: 12,
-    fontWeight: "700",
+    color: colors.onAccent,
+    fontSize: font.small,
+    fontWeight: "600",
   },
   btnDisabled: {
-    opacity: 0.5,
+    opacity: 0.45,
   },
   errorText: {
-    color: "#f87171",
-    fontSize: 12,
+    color: colors.dangerText,
+    fontSize: font.small,
+    lineHeight: 19,
   },
   previewCard: {
-    backgroundColor: "#0b0e14",
-    borderRadius: 8,
-    borderWidth: 1,
-    borderColor: "#3b82f6",
-    padding: 10,
-    gap: 8,
+    backgroundColor: colors.surface,
+    borderRadius: radius.md,
+    padding: space.md,
+    gap: space.sm,
   },
   previewHeader: {
     flexDirection: "row",
     alignItems: "center",
-    gap: 8,
+    gap: space.sm,
   },
   previewTitle: {
-    color: "#f9fafb",
+    color: colors.text,
     fontFamily: MONO_FONT,
-    fontSize: 12,
-    fontWeight: "700",
-  },
-  previewMeta: {
-    color: "#9ca3af",
-    fontFamily: MONO_FONT,
-    fontSize: 10,
-  },
-  mentionChip: {
-    backgroundColor: "#1e3a8a",
-    paddingHorizontal: 9,
-    paddingVertical: 5,
-    borderRadius: 5,
-    borderWidth: 1,
-    borderColor: "#60a5fa",
-  },
-  mentionChipText: {
-    color: "#ffffff",
-    fontFamily: MONO_FONT,
-    fontSize: 11,
-    fontWeight: "700",
-  },
-  closePreviewBtn: {
-    backgroundColor: "#1f2937",
-    paddingHorizontal: 8,
-    paddingVertical: 5,
-    borderRadius: 5,
-  },
-  closePreviewText: {
-    color: "#d1d5db",
-    fontSize: 11,
+    fontSize: font.small,
     fontWeight: "600",
   },
+  previewMeta: {
+    color: colors.textMuted,
+    fontSize: font.caption,
+  },
+  mentionChip: {
+    minHeight: 36,
+    justifyContent: "center",
+    backgroundColor: colors.accentSoft,
+    paddingHorizontal: space.md,
+    borderRadius: radius.sm,
+  },
+  mentionChipText: {
+    color: colors.accentText,
+    fontSize: font.small,
+    fontWeight: "600",
+  },
+  closePreviewBtn: {
+    width: 36,
+    height: 36,
+    alignItems: "center",
+    justifyContent: "center",
+    borderRadius: radius.sm,
+  },
+  closePreviewText: {
+    color: colors.textMuted,
+    fontSize: font.body,
+  },
   binaryWarning: {
-    color: "#fbbf24",
-    fontSize: 12,
-    fontStyle: "italic",
+    color: colors.warning,
+    fontSize: font.small,
+    lineHeight: 19,
   },
   previewCodeScroll: {
-    maxHeight: 240,
-    backgroundColor: "#080a0f",
-    padding: 8,
-    borderRadius: 6,
+    maxHeight: 280,
+    backgroundColor: colors.surfaceSunken,
+    padding: space.md,
+    borderRadius: radius.sm,
   },
   previewCodeText: {
-    color: "#e5e7eb",
+    color: colors.text,
     fontFamily: MONO_FONT,
-    fontSize: 11,
-    lineHeight: 16,
+    fontSize: font.caption,
+    lineHeight: 18,
   },
   entriesScroll: {
-    maxHeight: 280,
+    maxHeight: 320,
   },
   entriesScrollFull: {
     flex: 1,
   },
   entriesContent: {
-    gap: 5,
-    paddingBottom: 20,
+    paddingBottom: space.xl,
   },
   entryRow: {
     flexDirection: "row",
     alignItems: "center",
-    backgroundColor: "#0d1017",
-    borderRadius: 7,
-    borderWidth: 1,
-    borderColor: "#1f2430",
-    overflow: "hidden",
+    borderBottomWidth: StyleSheet.hairlineWidth,
+    borderBottomColor: colors.border,
   },
   entryMainPress: {
     flex: 1,
     flexDirection: "row",
     alignItems: "center",
-    gap: 8,
-    paddingHorizontal: 10,
-    paddingVertical: 8,
+    gap: space.md,
+    minHeight: touch + 4,
+    paddingHorizontal: space.xs,
   },
   entryIcon: {
-    fontSize: 13,
+    fontSize: font.body,
   },
   dirName: {
     flex: 1,
-    color: "#f3f4f6",
-    fontFamily: MONO_FONT,
-    fontSize: 12,
-    fontWeight: "600",
+    color: colors.text,
+    fontSize: font.body,
+    fontWeight: "500",
   },
   fileName: {
     flex: 1,
-    color: "#d1d5db",
-    fontFamily: MONO_FONT,
-    fontSize: 12,
+    color: colors.textMuted,
+    fontSize: font.body,
   },
   fileSizeText: {
-    color: "#6b7280",
-    fontFamily: MONO_FONT,
-    fontSize: 10,
+    color: colors.textFaint,
+    fontSize: font.caption,
   },
   gitBadge: {
-    backgroundColor: "#065f46",
-    color: "#6ee7b7",
-    fontFamily: MONO_FONT,
-    fontSize: 9,
-    fontWeight: "700",
-    paddingHorizontal: 5,
-    paddingVertical: 2,
-    borderRadius: 4,
+    backgroundColor: colors.successSoft,
+    color: colors.success,
+    fontSize: font.caption,
+    fontWeight: "500",
+    paddingHorizontal: 6,
+    paddingVertical: 1,
+    borderRadius: radius.pill,
+    overflow: "hidden",
   },
   rowMentionBtn: {
-    backgroundColor: "#172554",
-    paddingHorizontal: 11,
-    paddingVertical: 8,
-    borderLeftWidth: 1,
-    borderLeftColor: "#1e3a8a",
+    width: touch,
+    height: touch,
+    alignItems: "center",
+    justifyContent: "center",
   },
   rowMentionText: {
-    color: "#93c5fd",
-    fontFamily: MONO_FONT,
-    fontSize: 12,
-    fontWeight: "700",
+    color: colors.accentText,
+    fontSize: font.title,
+    fontWeight: "600",
   },
   emptyText: {
-    color: "#9ca3af",
-    fontSize: 12,
-    fontStyle: "italic",
-    paddingVertical: 10,
+    color: colors.textFaint,
+    fontSize: font.small,
+    paddingVertical: space.xl,
     textAlign: "center",
   },
 });

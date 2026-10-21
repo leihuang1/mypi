@@ -1,7 +1,6 @@
 import React, { useEffect, useRef, useState } from "react";
 import {
   ActivityIndicator,
-  Platform,
   Pressable,
   ScrollView,
   StyleSheet,
@@ -17,12 +16,7 @@ import type {
   ThinkingLevel,
 } from "@mypi/shared";
 import { FileBrowserPanel } from "../components/FileBrowserPanel";
-
-const MONO_FONT = Platform.select({
-  ios: "Menlo",
-  android: "monospace",
-  default: "monospace",
-});
+import { colors, font, radius, space } from "../theme";
 
 const THINKING_LEVELS: ThinkingLevel[] = [
   "off",
@@ -108,7 +102,7 @@ export function NewSessionScreen({
   return (
     <ScrollView style={styles.container} contentContainerStyle={styles.content}>
       <View style={styles.headerRow}>
-        <Text style={styles.title}>New Durable Session</Text>
+        <Text style={styles.title}>New session</Text>
         <Pressable onPress={handleCancel} style={styles.cancelBtn}>
           <Text style={styles.cancelBtnText}>Cancel</Text>
         </Pressable>
@@ -116,7 +110,7 @@ export function NewSessionScreen({
 
       <View style={styles.card}>
         <Text style={styles.sectionTitle}>
-          1. PROJECT DIRECTORY WORKBENCH (REMOTE)
+          Project folder
         </Text>
         <FileBrowserPanel
           client={client}
@@ -128,7 +122,7 @@ export function NewSessionScreen({
       </View>
 
       <View style={styles.card}>
-        <Text style={styles.sectionTitle}>2. MODEL & THINKING LEVEL</Text>
+        <Text style={styles.sectionTitle}>Model</Text>
         <ScrollView
           horizontal
           showsHorizontalScrollIndicator={false}
@@ -160,7 +154,7 @@ export function NewSessionScreen({
           })}
         </ScrollView>
 
-        <Text style={styles.fieldLabel}>Thinking Effort</Text>
+        <Text style={styles.fieldLabel}>Thinking effort</Text>
         <View style={styles.thinkingRow}>
           {THINKING_LEVELS.map((lvl) => {
             const active = thinkingLevel === lvl;
@@ -186,11 +180,11 @@ export function NewSessionScreen({
           })}
         </View>
 
-        <Text style={styles.fieldLabel}>Session Title (Optional)</Text>
+        <Text style={styles.fieldLabel}>Title (optional)</Text>
         <TextInput
           style={styles.input}
-          placeholder="Auto-named from project folder or first message"
-          placeholderTextColor="#4b5563"
+          placeholder="Named automatically if left blank"
+          placeholderTextColor={colors.textFaint}
           value={sessionName}
           onChangeText={setSessionName}
         />
@@ -203,10 +197,10 @@ export function NewSessionScreen({
           disabled={creating}
         >
           {creating ? (
-            <ActivityIndicator color="#ffffff" size="small" />
+            <ActivityIndicator color={colors.onAccent} size="small" />
           ) : (
             <Text style={styles.createBtnText}>
-              Start Durable Session in {currentDir.split("/").pop() || "Folder"}
+              Start in {currentDir.split("/").pop() || "folder"}
             </Text>
           )}
         </Pressable>
@@ -218,132 +212,136 @@ export function NewSessionScreen({
 const styles = StyleSheet.create({
   container: {
     flex: 1,
-    backgroundColor: "#0b0e14",
+    backgroundColor: colors.bg,
   },
   content: {
-    padding: 16,
-    gap: 16,
-    paddingBottom: 40,
+    padding: space.lg,
+    gap: space.lg,
+    paddingBottom: 48,
   },
   headerRow: {
     flexDirection: "row",
     justifyContent: "space-between",
     alignItems: "center",
+    gap: space.md,
   },
   title: {
-    color: "#f9fafb",
-    fontSize: 19,
+    flex: 1,
+    color: colors.text,
+    fontSize: font.heading,
     fontWeight: "700",
-  },
-  cancelBtn: {
-    paddingHorizontal: 12,
-    paddingVertical: 6,
-    backgroundColor: "#1f2937",
-    borderRadius: 6,
-  },
-  cancelBtnText: {
-    color: "#d1d5db",
-    fontSize: 13,
-    fontWeight: "600",
   },
   card: {
-    backgroundColor: "#141821",
-    borderRadius: 10,
-    borderWidth: 1,
-    borderColor: "#262d3d",
-    padding: 14,
-    gap: 10,
-  },
-  sectionTitle: {
-    color: "#60a5fa",
-    fontSize: 11,
-    fontWeight: "700",
-    letterSpacing: 0.7,
-  },
-  pillsRow: {
-    gap: 8,
-    paddingVertical: 4,
-  },
-  modelPill: {
-    paddingHorizontal: 12,
-    paddingVertical: 8,
-    borderRadius: 8,
-    backgroundColor: "#0d1017",
-    borderWidth: 1,
-    borderColor: "#262d3d",
-  },
-  modelPillActive: {
-    backgroundColor: "#1e3a8a",
-    borderColor: "#60a5fa",
-  },
-  modelPillText: {
-    color: "#9ca3af",
-    fontFamily: MONO_FONT,
-    fontSize: 12,
-  },
-  modelPillTextActive: {
-    color: "#ffffff",
-    fontWeight: "700",
+    backgroundColor: colors.surface,
+    borderRadius: radius.lg,
+    padding: space.lg,
+    gap: space.md,
   },
   fieldLabel: {
-    color: "#d1d5db",
-    fontSize: 12,
-    fontWeight: "600",
-    marginTop: 4,
-  },
-  thinkingRow: {
-    flexDirection: "row",
-    flexWrap: "wrap",
-    gap: 8,
-  },
-  thinkingPill: {
-    paddingHorizontal: 10,
-    paddingVertical: 6,
-    borderRadius: 6,
-    backgroundColor: "#0d1017",
-    borderWidth: 1,
-    borderColor: "#262d3d",
-  },
-  thinkingPillActive: {
-    backgroundColor: "#065f46",
-    borderColor: "#34d399",
-  },
-  thinkingPillText: {
-    color: "#9ca3af",
-    fontFamily: MONO_FONT,
-    fontSize: 12,
-  },
-  thinkingPillTextActive: {
-    color: "#ecfdf5",
-    fontWeight: "700",
-  },
-  input: {
-    backgroundColor: "#0b0e14",
-    borderWidth: 1,
-    borderColor: "#2e3646",
-    borderRadius: 8,
-    paddingHorizontal: 12,
-    paddingVertical: 10,
-    color: "#f3f4f6",
-    fontSize: 13,
+    color: colors.textMuted,
+    fontSize: font.small,
+    fontWeight: "500",
+    marginTop: space.xs,
+    marginBottom: -space.xs,
   },
   errorText: {
-    color: "#f87171",
-    fontSize: 12,
-  },
-  createBtn: {
-    backgroundColor: "#2563eb",
-    paddingVertical: 13,
-    borderRadius: 8,
-    alignItems: "center",
-    marginTop: 6,
+    color: colors.dangerText,
+    fontSize: font.small,
+    lineHeight: 19,
   },
   btnDisabled: {
     opacity: 0.6,
   },
+  cancelBtn: {
+    minHeight: 40,
+    justifyContent: "center",
+    paddingHorizontal: space.lg,
+    backgroundColor: colors.surface,
+    borderRadius: radius.pill,
+  },
+  cancelBtnText: {
+    color: colors.text,
+    fontSize: font.body,
+    fontWeight: "500",
+  },
+  sectionTitle: {
+    color: colors.text,
+    fontSize: font.body,
+    fontWeight: "600",
+  },
+  pillsRow: {
+    gap: space.sm,
+    paddingVertical: 2,
+  },
+  modelPill: {
+    minHeight: 40,
+    justifyContent: "center",
+    paddingHorizontal: space.md,
+    borderRadius: radius.pill,
+    backgroundColor: colors.surfaceRaised,
+    borderWidth: 1,
+    borderColor: "transparent",
+  },
+  modelPillActive: {
+    backgroundColor: colors.accentSoft,
+    borderColor: colors.accent,
+  },
+  modelPillText: {
+    color: colors.textMuted,
+    fontSize: font.small,
+  },
+  modelPillTextActive: {
+    color: colors.text,
+    fontWeight: "600",
+  },
+  thinkingRow: {
+    flexDirection: "row",
+    flexWrap: "wrap",
+    gap: space.sm,
+  },
+  thinkingPill: {
+    minHeight: 36,
+    justifyContent: "center",
+    paddingHorizontal: space.md,
+    borderRadius: radius.pill,
+    backgroundColor: colors.surfaceRaised,
+    borderWidth: 1,
+    borderColor: "transparent",
+  },
+  thinkingPillActive: {
+    backgroundColor: colors.accentSoft,
+    borderColor: colors.accent,
+  },
+  thinkingPillText: {
+    color: colors.textMuted,
+    fontSize: font.small,
+  },
+  thinkingPillTextActive: {
+    color: colors.text,
+    fontWeight: "600",
+  },
+  input: {
+    minHeight: 48,
+    backgroundColor: colors.surfaceSunken,
+    borderWidth: 1,
+    borderColor: colors.border,
+    borderRadius: radius.md,
+    paddingHorizontal: space.md,
+    paddingVertical: space.sm,
+    color: colors.text,
+    fontSize: font.body,
+  },
+  createBtn: {
+    minHeight: 50,
+    justifyContent: "center",
+    backgroundColor: colors.accent,
+    borderRadius: radius.md,
+    alignItems: "center",
+    marginTop: space.xs,
+  },
   createBtnText: {
-    color: "#ffffff",
-    fontSize: 14,
-    fontWeight: "700",
+    color: colors.onAccent,
+    fontSize: font.body,
+    fontWeight: "600",
   },
 });

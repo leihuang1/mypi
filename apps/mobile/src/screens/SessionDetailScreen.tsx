@@ -27,6 +27,7 @@ import {
   type TranscriptItem,
 } from "@mypi/shared";
 import { FileBrowserPanel } from "../components/FileBrowserPanel";
+import { MarkdownText } from "../components/MarkdownText";
 import { useWorkspaceChanges } from "../store/use-workspace-changes";
 import { GitDiffPanel } from "../components/GitDiffPanel";
 import { flushSessionViews, getSessionView, persistSessionViews, saveSessionView, sessionViewKey } from "../store/session-view-store";
@@ -35,12 +36,8 @@ import {
   type FailedSubmissionDraft,
   restoreFailedDraftToInput,
 } from "../store/session-lifecycle";
+import { colors, font, MONO_FONT, radius, space, touch } from "../theme";
 
-const MONO_FONT = Platform.select({
-  ios: "Menlo",
-  android: "monospace",
-  default: "monospace",
-});
 
 const THINKING_LEVELS: ThinkingLevel[] = [
   "off",
@@ -94,15 +91,15 @@ function AssistantMessageCard({ item }: { item: AssistantTranscriptItem }) {
   return (
     <View style={styles.assistantBubble}>
       <View style={styles.roleHeader}>
-        <Text style={styles.assistantRoleText}>PI AGENT</Text>
+        <Text style={styles.assistantRoleText}>Pi</Text>
         {item.status === "streaming" && (
-          <Text style={styles.streamingBadge}>● STREAMING</Text>
+          <Text style={styles.streamingBadge}>● Writing…</Text>
         )}
         {item.status === "aborted" && (
-          <Text style={styles.abortedBadge}>ABORTED</Text>
+          <Text style={styles.abortedBadge}>Stopped</Text>
         )}
         {item.status === "error" && (
-          <Text style={styles.errorBadge}>ERROR</Text>
+          <Text style={styles.errorBadge}>Error</Text>
         )}
       </View>
 
@@ -113,7 +110,7 @@ function AssistantMessageCard({ item }: { item: AssistantTranscriptItem }) {
             style={styles.thinkingHeader}
           >
             <Text style={styles.thinkingTitle}>
-              💭 Thinking ({item.thinking.length} chars) {showThinking ? "▾" : "▸"}
+              {showThinking ? "▾" : "▸"} Thinking · {formatCompactNumber(item.thinking.length)} chars
             </Text>
           </Pressable>
           {showThinking && (
@@ -125,9 +122,7 @@ function AssistantMessageCard({ item }: { item: AssistantTranscriptItem }) {
       ) : null}
 
       {item.text ? (
-        <Text style={styles.assistantText} selectable>
-          {item.text}
-        </Text>
+        <MarkdownText text={item.text} />
       ) : null}
 
       {item.errorMessage ? (
@@ -575,17 +570,17 @@ export function SessionDetailScreen({
 
   const statusColor =
     connStatus === "connected"
-      ? "#10b981"
+      ? colors.success
       : connStatus === "connecting" || connStatus === "reconnecting"
-        ? "#f59e0b"
-        : "#ef4444";
+        ? colors.warning
+        : colors.danger;
 
   const ctxBarColor =
     contextPercent >= 85
-      ? "#ef4444"
+      ? colors.danger
       : contextPercent >= 65
-        ? "#f59e0b"
-        : "#3b82f6";
+        ? colors.warning
+        : colors.accent;
 
   const filteredQuickDirs = useMemo(() => {
     const dirs = quickListing?.dirs ?? [];
@@ -612,6 +607,7 @@ export function SessionDetailScreen({
           onPress={onBack}
           style={styles.backIconBtn}
           accessibilityLabel="Back to sessions"
+          hitSlop={6}
         >
           <Text style={styles.backIconText}>‹</Text>
         </Pressable>
@@ -632,7 +628,7 @@ export function SessionDetailScreen({
             <Text style={styles.editHintIcon}>✎</Text>
           </View>
           <Text style={styles.cwdText} numberOfLines={1}>
-            📁 {shortenPath(activeCwd)}
+            {shortenPath(activeCwd)}
           </Text>
         </Pressable>
 
@@ -650,7 +646,7 @@ export function SessionDetailScreen({
                 activeTab === "chat" ? styles.tabBtnTextActive : null,
               ]}
             >
-              Chat ({liveState.items.length})
+              Chat
             </Text>
           </Pressable>
           <Pressable
@@ -692,8 +688,7 @@ export function SessionDetailScreen({
             />
           </View>
           <Text style={styles.ctxMetaText} numberOfLines={1}>
-            Ctx {formatCompactNumber(contextTokens)} /{" "}
-            {formatCompactNumber(contextWindow)} ({contextPercent}%)
+            {formatCompactNumber(contextTokens)} / {formatCompactNumber(contextWindow)} · {contextPercent}%
             {liveState.usage.totalCost > 0
               ? ` · $${liveState.usage.totalCost.toFixed(2)}`
               : ""}
@@ -710,7 +705,7 @@ export function SessionDetailScreen({
               setTopSheet((prev) => (prev === "compact" ? null : "compact"))
             }
           >
-            <Text style={styles.miniIconPillText}>🗜 Compact</Text>
+            <Text style={styles.miniIconPillText}>Compact</Text>
           </Pressable>
           <Pressable
             style={[
@@ -721,7 +716,7 @@ export function SessionDetailScreen({
               setTopSheet((prev) => (prev === "reset" ? null : "reset"))
             }
           >
-            <Text style={styles.miniIconPillText}>↺ Reset</Text>
+            <Text style={styles.miniIconPillText}>Reset</Text>
           </Pressable>
         </View>
       </View>
@@ -730,7 +725,7 @@ export function SessionDetailScreen({
       {topSheet === "rename" && (
         <View style={styles.topPopoverCard}>
           <View style={styles.popoverHeaderRow}>
-            <Text style={styles.popoverTitle}>SESSION TITLE & WORKSPACE</Text>
+            <Text style={styles.popoverTitle}>Session</Text>
             <Pressable onPress={() => setTopSheet(null)}>
               <Text style={styles.popoverCloseText}>✕</Text>
             </Pressable>
@@ -741,7 +736,7 @@ export function SessionDetailScreen({
               value={sessionTitleDraft}
               onChangeText={setSessionTitleDraft}
               placeholder="Session title"
-              placeholderTextColor="#6b7280"
+              placeholderTextColor={colors.textFaint}
             />
             <Pressable
               style={styles.popoverPrimaryBtn}
@@ -755,7 +750,7 @@ export function SessionDetailScreen({
           </View>
           <View style={styles.cwdSwitchRow}>
             <Text style={styles.cwdDrawerText} numberOfLines={1}>
-              📁 {activeCwd}
+              {activeCwd}
             </Text>
             <Pressable
               style={styles.popoverSecondaryBtn}
@@ -764,7 +759,7 @@ export function SessionDetailScreen({
                 setActiveTab("files");
               }}
             >
-              <Text style={styles.popoverSecondaryBtnText}>Switch CWD →</Text>
+              <Text style={styles.popoverSecondaryBtnText}>Change folder</Text>
             </Pressable>
           </View>
         </View>
@@ -778,34 +773,42 @@ export function SessionDetailScreen({
           <View style={styles.popoverHeaderRow}>
             <Text style={styles.popoverTitle}>
               {topSheet === "compact"
-                ? "🗜 COMPACT CONTEXT WINDOW"
+                ? "Compact context"
                 : topSheet === "reset"
-                  ? "↺ RESET SESSION CONTEXT"
-                  : "SESSION TOKEN TELEMETRY"}
+                  ? "Reset context"
+                  : "Token usage"}
             </Text>
             <Pressable onPress={() => setTopSheet(null)}>
               <Text style={styles.popoverCloseText}>✕</Text>
             </Pressable>
           </View>
 
-          <Text style={styles.usageBreakdownText}>
-            Active Context: {formatCompactNumber(contextTokens)} /{" "}
-            {formatCompactNumber(contextWindow)} ({contextPercent}%) • Session
-            Total: {formatCompactNumber(liveState.usage.totalTokens)} tok (In{" "}
-            {formatCompactNumber(liveState.usage.inputTokens)} · Out{" "}
-            {formatCompactNumber(liveState.usage.outputTokens)} · Cache{" "}
-            {formatCompactNumber(liveState.usage.cacheReadTokens)})
-            {liveState.usage.totalCost > 0
-              ? ` · $${liveState.usage.totalCost.toFixed(4)}`
-              : ""}
-          </Text>
+          <View style={styles.usageGrid}>
+            {[
+              ["Context", `${formatCompactNumber(contextTokens)} / ${formatCompactNumber(contextWindow)} (${contextPercent}%)`],
+              ["Total", `${formatCompactNumber(liveState.usage.totalTokens)} tokens`],
+              ["In / Out", `${formatCompactNumber(liveState.usage.inputTokens)} / ${formatCompactNumber(liveState.usage.outputTokens)}`],
+              ["Cache read", formatCompactNumber(liveState.usage.cacheReadTokens)],
+              ...(liveState.usage.totalCost > 0 ? [["Cost", `$${liveState.usage.totalCost.toFixed(4)}`]] : []),
+            ].map(([label, value]) => (
+              <View key={label} style={styles.usageRow}>
+                <Text style={styles.usageLabel}>{label}</Text>
+                <Text style={styles.usageValue}>{value}</Text>
+              </View>
+            ))}
+          </View>
+          {topSheet === "reset" && (
+            <Text style={styles.sheetHint}>
+              Starts a fresh context in this session. The transcript stays, but the model forgets it.
+            </Text>
+          )}
 
           {topSheet === "compact" && (
             <View style={styles.renameRow}>
               <TextInput
                 style={[styles.popoverInput, { flex: 1 }]}
-                placeholder="Optional focus instructions for summary..."
-                placeholderTextColor="#6b7280"
+                placeholder="Focus for the summary (optional)"
+                placeholderTextColor={colors.textFaint}
                 value={compactInstructions}
                 onChangeText={setCompactInstructions}
               />
@@ -815,7 +818,7 @@ export function SessionDetailScreen({
                 disabled={controlBusy}
               >
                 <Text style={styles.popoverPrimaryBtnText}>
-                  {controlBusy ? "..." : "Compact"}
+                  {controlBusy ? "…" : "Compact"}
                 </Text>
               </Pressable>
             </View>
@@ -825,21 +828,18 @@ export function SessionDetailScreen({
             <View style={styles.renameRow}>
               <TextInput
                 style={[styles.popoverInput, { flex: 1 }]}
-                placeholder="Optional handoff prompt after reset..."
-                placeholderTextColor="#6b7280"
+                placeholder="Handoff prompt (optional)"
+                placeholderTextColor={colors.textFaint}
                 value={resetPrompt}
                 onChangeText={setResetPrompt}
               />
               <Pressable
-                style={[
-                  styles.popoverPrimaryBtn,
-                  { backgroundColor: "#dc2626" },
-                ]}
+                style={[styles.popoverPrimaryBtn, styles.popoverDangerBtn]}
                 onPress={handleReset}
                 disabled={controlBusy}
               >
                 <Text style={styles.popoverPrimaryBtnText}>
-                  {controlBusy ? "..." : "Reset"}
+                  {controlBusy ? "…" : "Reset"}
                 </Text>
               </Pressable>
             </View>
@@ -886,66 +886,66 @@ export function SessionDetailScreen({
         </View>
       ) : (
         <>
-          <ScrollView
-            ref={attachScroll}
-            style={styles.chatScroll}
-            contentContainerStyle={styles.chatContent}
-            scrollEventThrottle={32}
-            onContentSizeChange={restoreOrFollowScroll}
-            onLayout={restoreOrFollowScroll}
-            onScrollBeginDrag={() => { userScrollingRef.current = true; }}
-            onScrollEndDrag={() => { userScrollingRef.current = false; }}
-            onMomentumScrollBegin={() => { userScrollingRef.current = true; }}
-            onMomentumScrollEnd={() => { userScrollingRef.current = false; }}
-            onScroll={(e) => {
-              const { layoutMeasurement, contentOffset, contentSize } =
-                e.nativeEvent;
-              const distanceFromBottom =
-                contentSize.height -
-                (layoutMeasurement.height + contentOffset.y);
-              if (!snapshotReady || restoreScrollRef.current) return;
-              saveSessionView(viewKey, { offset: Math.max(0, contentOffset.y) });
-              if (userScrollingRef.current || Platform.OS === "web") {
-                isNearBottomRef.current = distanceFromBottom <= 48;
-                if (isNearBottomRef.current) setHasNewMessages(false);
-                saveSessionView(viewKey, {
-                  offset: Math.max(0, contentOffset.y),
-                  following: isNearBottomRef.current,
-                  ...(isNearBottomRef.current ? { advanceKey: transcriptAdvanceKey } : {}),
-                });
-              }
-            }}
-          >
-            {liveState.items.length === 0 ? (
-              <View style={styles.emptyChatBox}>
-                <Text style={styles.emptyChatTitle}>
-                  Durable Session Ready
-                </Text>
-                <Text style={styles.emptyChatSub}>
-                  Send a prompt below, or use the quick toolbar next to the input box to @-mention files, switch models, or manage context.
-                </Text>
-              </View>
-            ) : (
-              liveState.items.map((item) => (
-                <TranscriptItemRow key={item.id} item={item} />
-              ))
-            )}
+          <View style={styles.chatArea}>
+            <ScrollView
+              ref={attachScroll}
+              style={styles.chatScroll}
+              contentContainerStyle={styles.chatContent}
+              scrollEventThrottle={32}
+              onContentSizeChange={restoreOrFollowScroll}
+              onLayout={restoreOrFollowScroll}
+              onScrollBeginDrag={() => { userScrollingRef.current = true; }}
+              onScrollEndDrag={() => { userScrollingRef.current = false; }}
+              onMomentumScrollBegin={() => { userScrollingRef.current = true; }}
+              onMomentumScrollEnd={() => { userScrollingRef.current = false; }}
+              onScroll={(e) => {
+                const { layoutMeasurement, contentOffset, contentSize } =
+                  e.nativeEvent;
+                const distanceFromBottom =
+                  contentSize.height -
+                  (layoutMeasurement.height + contentOffset.y);
+                if (!snapshotReady || restoreScrollRef.current) return;
+                saveSessionView(viewKey, { offset: Math.max(0, contentOffset.y) });
+                if (userScrollingRef.current || Platform.OS === "web") {
+                  isNearBottomRef.current = distanceFromBottom <= 48;
+                  if (isNearBottomRef.current) setHasNewMessages(false);
+                  saveSessionView(viewKey, {
+                    offset: Math.max(0, contentOffset.y),
+                    following: isNearBottomRef.current,
+                    ...(isNearBottomRef.current ? { advanceKey: transcriptAdvanceKey } : {}),
+                  });
+                }
+              }}
+            >
+              {liveState.items.length === 0 ? (
+                <View style={styles.emptyChatBox}>
+                  <Text style={styles.emptyChatTitle}>Ready when you are</Text>
+                  <Text style={styles.emptyChatSub}>
+                    Send a prompt below. Use @ to mention files, or tap the model chip to switch models.
+                  </Text>
+                </View>
+              ) : (
+                liveState.items.map((item) => (
+                  <TranscriptItemRow key={item.id} item={item} />
+                ))
+              )}
 
-            {liveState.retry && (
-              <View style={styles.retryBanner}>
-                <Text style={styles.retryText}>
-                  Retrying model request (attempt #{liveState.retry.attempt}):{" "}
-                  {liveState.retry.errorMessage}
-                </Text>
-              </View>
-            )}
-          </ScrollView>
+              {liveState.retry && (
+                <View style={styles.retryBanner}>
+                  <Text style={styles.retryText}>
+                    Retrying (attempt {liveState.retry.attempt}):{" "}
+                    {liveState.retry.errorMessage}
+                  </Text>
+                </View>
+              )}
+            </ScrollView>
 
-          {hasNewMessages && (
-            <Pressable style={styles.newMessages} onPress={scrollToLatest} accessibilityRole="button">
-              <Text style={styles.newMessagesText}>新消息 ↓</Text>
-            </Pressable>
-          )}
+            {hasNewMessages && (
+              <Pressable style={styles.newMessages} onPress={scrollToLatest} accessibilityRole="button">
+                <Text style={styles.newMessagesText}>新消息 ↓</Text>
+              </Pressable>
+            )}
+          </View>
 
           {/* Bottom Composer Dock & Thumb-Reachable Quick Popovers */}
           <View style={styles.composerDock}>
@@ -953,12 +953,12 @@ export function SessionDetailScreen({
             {liveState.inbox.length > 0 && (
               <View style={styles.inboxQueueBox}>
                 <Text style={styles.inboxQueueHeader}>
-                  QUEUED SUBMISSIONS ({liveState.inbox.length})
+                  Queued · {liveState.inbox.length}
                 </Text>
                 {liveState.inbox.map((qItem) => (
                   <View key={qItem.id} style={styles.inboxItemRow}>
                     <Text style={styles.inboxTimingBadge}>
-                      {qItem.mode === "steer" ? "⚡ STEER" : "⏳ QUEUE"}
+                      {qItem.mode === "steer" ? "Steer" : "Queue"}
                     </Text>
                     <Text style={styles.inboxItemText} numberOfLines={1}>
                       {qItem.text || `Submission #${qItem.id}`}
@@ -966,8 +966,9 @@ export function SessionDetailScreen({
                     <Pressable
                       style={styles.inboxAbortBtn}
                       onPress={() => handleAbortSubmission(qItem.id)}
+                      hitSlop={6}
                     >
-                      <Text style={styles.inboxAbortText}>✕ Withdraw</Text>
+                      <Text style={styles.inboxAbortText}>Withdraw</Text>
                     </Pressable>
                   </View>
                 ))}
@@ -978,7 +979,7 @@ export function SessionDetailScreen({
             {bottomTray === "actions" && (
               <View style={styles.bottomSheetCard}>
                 <View style={styles.popoverHeaderRow}>
-                  <Text style={styles.popoverTitle}>QUICK SESSION ACTIONS</Text>
+                  <Text style={styles.popoverTitle}>Actions</Text>
                   <Pressable onPress={() => setBottomTray(null)}>
                     <Text style={styles.popoverCloseText}>✕</Text>
                   </Pressable>
@@ -989,14 +990,14 @@ export function SessionDetailScreen({
                     onPress={() => setBottomTray("mention")}
                   >
                     <Text style={styles.quickActionIcon}>@</Text>
-                    <Text style={styles.quickActionLabel}>Mention File</Text>
+                    <Text style={styles.quickActionLabel}>Mention file</Text>
                   </Pressable>
                   <Pressable
                     style={styles.quickActionTile}
                     onPress={() => setBottomTray("model")}
                   >
-                    <Text style={styles.quickActionIcon}>⚡</Text>
-                    <Text style={styles.quickActionLabel}>Model & Effort</Text>
+                    <Text style={styles.quickActionIcon}>◆</Text>
+                    <Text style={styles.quickActionLabel}>Model & effort</Text>
                   </Pressable>
                   <Pressable
                     style={styles.quickActionTile}
@@ -1005,8 +1006,8 @@ export function SessionDetailScreen({
                       setTopSheet("compact");
                     }}
                   >
-                    <Text style={styles.quickActionIcon}>🗜</Text>
-                    <Text style={styles.quickActionLabel}>Compact Ctx</Text>
+                    <Text style={styles.quickActionIcon}>⇲</Text>
+                    <Text style={styles.quickActionLabel}>Compact context</Text>
                   </Pressable>
                   <Pressable
                     style={styles.quickActionTile}
@@ -1016,7 +1017,7 @@ export function SessionDetailScreen({
                     }}
                   >
                     <Text style={styles.quickActionIcon}>↺</Text>
-                    <Text style={styles.quickActionLabel}>Reset Ctx</Text>
+                    <Text style={styles.quickActionLabel}>Reset context</Text>
                   </Pressable>
                   <Pressable
                     style={styles.quickActionTile}
@@ -1025,8 +1026,8 @@ export function SessionDetailScreen({
                       setActiveTab("files");
                     }}
                   >
-                    <Text style={styles.quickActionIcon}>📁</Text>
-                    <Text style={styles.quickActionLabel}>Browse Files</Text>
+                    <Text style={styles.quickActionIcon}>▤</Text>
+                    <Text style={styles.quickActionLabel}>Browse files</Text>
                   </Pressable>
                 </View>
               </View>
@@ -1045,11 +1046,10 @@ export function SessionDetailScreen({
                           setQuickBrowsePath(quickListing.parent!);
                         }}
                       >
-                        <Text style={styles.quickUpBtnText}>⬆ Up</Text>
+                        <Text style={styles.quickUpBtnText}>‹ Up</Text>
                       </Pressable>
                     ) : null}
                     <Text style={styles.popoverTitle} numberOfLines={1}>
-                      📁{" "}
                       {toRelativeMention(
                         quickBrowsePath || activeCwd,
                         activeCwd,
@@ -1069,7 +1069,7 @@ export function SessionDetailScreen({
                         }
                       >
                         <Text style={styles.mentionCurrentDirText}>
-                          + @Folder
+                          @ this folder
                         </Text>
                       </Pressable>
                     ) : null}
@@ -1079,7 +1079,7 @@ export function SessionDetailScreen({
                         setActiveTab("files");
                       }}
                     >
-                      <Text style={styles.fullBrowserLink}>Files ↗</Text>
+                      <Text style={styles.fullBrowserLink}>All files</Text>
                     </Pressable>
                     <Pressable onPress={() => setBottomTray(null)}>
                       <Text style={styles.popoverCloseText}>✕</Text>
@@ -1089,8 +1089,8 @@ export function SessionDetailScreen({
 
                 <TextInput
                   style={styles.popoverInput}
-                  placeholder="Filter current folder (tap folder to open, file to @)..."
-                  placeholderTextColor="#6b7280"
+                  placeholder="Filter this folder"
+                  placeholderTextColor={colors.textFaint}
                   value={quickFilter}
                   onChangeText={setQuickFilter}
                   autoCapitalize="none"
@@ -1099,7 +1099,7 @@ export function SessionDetailScreen({
 
                 {loadingQuickFiles ? (
                   <ActivityIndicator
-                    color="#60a5fa"
+                    color={colors.accent}
                     size="small"
                     style={{ marginVertical: 10 }}
                   />
@@ -1119,7 +1119,7 @@ export function SessionDetailScreen({
                           }}
                         >
                           <Text style={styles.quickDirText}>
-                            📁 {d.name}/ ›
+                            {d.name}/
                           </Text>
                         </Pressable>
                         <Pressable
@@ -1145,7 +1145,7 @@ export function SessionDetailScreen({
                         }
                       >
                         <Text style={styles.quickMentionChipText}>
-                          📄 {f.name}
+                          {f.name}
                         </Text>
                       </Pressable>
                     ))}
@@ -1165,7 +1165,7 @@ export function SessionDetailScreen({
               <View style={styles.bottomSheetCard}>
                 <View style={styles.popoverHeaderRow}>
                   <Text style={styles.popoverTitle}>
-                    SWITCH MODEL & THINKING EFFORT
+                    Model & thinking effort
                   </Text>
                   <Pressable onPress={() => setBottomTray(null)}>
                     <Text style={styles.popoverCloseText}>✕</Text>
@@ -1241,7 +1241,7 @@ export function SessionDetailScreen({
               <View style={styles.failedDraftBox}>
                 <View style={styles.failedDraftTextCol}>
                   <Text style={styles.failedDraftTitle}>
-                    Delivery unconfirmed:
+                    Delivery unconfirmed
                   </Text>
                   <Text style={styles.failedDraftPreview} numberOfLines={2}>
                     {failedDraft.content}
@@ -1254,7 +1254,7 @@ export function SessionDetailScreen({
                     disabled={sending}
                     accessibilityLabel="Retry failed message"
                   >
-                    <Text style={styles.failedRetryBtnText}>↻ Retry</Text>
+                    <Text style={styles.failedRetryBtnText}>Retry</Text>
                   </Pressable>
                   <Pressable
                     style={styles.failedRestoreBtn}
@@ -1294,10 +1294,10 @@ export function SessionDetailScreen({
                 style={styles.chatInput}
                 placeholder={
                   liveState.busy
-                    ? "Type instruction to steer mid-run or queue..."
-                    : "Ask Pi to inspect, edit, or @-mention files..."
+                    ? "Steer or queue a message…"
+                    : "Message Pi…"
                 }
-                placeholderTextColor="#6b7280"
+                placeholderTextColor={colors.textFaint}
                 value={inputText}
                 accessibilityLabel="Message"
                 onChangeText={updateInputText}
@@ -1364,7 +1364,7 @@ export function SessionDetailScreen({
                     accessibilityLabel="Switch model and thinking level"
                   >
                     <Text style={styles.toolPillModelText} numberOfLines={1}>
-                      ⚡ {activeModel.modelId} · {activeThinking}
+                      {activeModel.modelId} · {activeThinking}
                     </Text>
                   </Pressable>
                 </View>
@@ -1379,14 +1379,14 @@ export function SessionDetailScreen({
                             onPress={() => handleSend("steer")}
                             disabled={sending || Boolean(failedDraft)}
                           >
-                            <Text style={styles.sendPillText}>⚡ Steer</Text>
+                            <Text style={styles.sendPillText}>Steer</Text>
                           </Pressable>
                           <Pressable
                             style={styles.queuePillBtn}
                             onPress={() => handleSend("followUp")}
                             disabled={sending || Boolean(failedDraft)}
                           >
-                            <Text style={styles.queuePillText}>+ Queue</Text>
+                            <Text style={styles.queuePillText}>Queue</Text>
                           </Pressable>
                         </>
                       ) : null}
@@ -1394,7 +1394,7 @@ export function SessionDetailScreen({
                         style={styles.stopPillBtn}
                         onPress={handleAbort}
                       >
-                        <Text style={styles.sendPillText}>■ Stop</Text>
+                        <Text style={styles.sendPillText}>Stop</Text>
                       </Pressable>
                     </>
                   ) : (
@@ -1409,7 +1409,7 @@ export function SessionDetailScreen({
                       disabled={!inputText.trim() || sending || Boolean(failedDraft)}
                       accessibilityLabel="Send message"
                     >
-                      <Text style={styles.sendPillText}>↑ Send</Text>
+                      <Text style={styles.sendIconText}>↑</Text>
                     </Pressable>
                   )}
                 </View>
@@ -1431,55 +1431,58 @@ export function SessionDetailScreen({
 }
 
 const styles = StyleSheet.create({
-  changesEntry: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", paddingHorizontal: 10, paddingVertical: 12, minHeight: 44 },
-  changesEntryText: { color: "#cbd5e1", fontSize: 12 },
-  changesEntryHint: { color: "#94a3b8", fontSize: 12 },
+  changesEntry: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", paddingHorizontal: space.md, minHeight: touch, backgroundColor: colors.surface, borderRadius: radius.md },
+  changesEntryText: { color: colors.text, fontSize: font.small, fontWeight: "500" },
+  changesEntryHint: { color: colors.textMuted, fontSize: font.small },
   newMessages: {
+    position: "absolute",
     alignSelf: "center",
-    paddingHorizontal: 16,
-    paddingVertical: 10,
-    borderRadius: 20,
-    backgroundColor: "#1e293b",
-    borderWidth: 1,
-    borderColor: "#334155",
-    marginVertical: 6,
+    bottom: space.md,
+    paddingHorizontal: space.lg,
+    minHeight: 36,
+    justifyContent: "center",
+    borderRadius: radius.pill,
+    backgroundColor: colors.accent,
+    elevation: 4,
+    shadowColor: "#000",
+    shadowOpacity: 0.3,
+    shadowRadius: 6,
+    shadowOffset: { width: 0, height: 2 },
   },
-  newMessagesText: { color: "#93c5fd", fontSize: 12, fontWeight: "600" },
+  newMessagesText: { color: colors.onAccent, fontSize: font.small, fontWeight: "600" },
   container: {
     flex: 1,
-    backgroundColor: "#0b0e14",
+    backgroundColor: colors.bg,
   },
   topBar: {
     flexDirection: "row",
     alignItems: "center",
-    paddingHorizontal: 10,
-    paddingVertical: 8,
-    backgroundColor: "#141821",
-    borderBottomWidth: 1,
-    borderBottomColor: "#222938",
-    gap: 8,
+    paddingLeft: space.xs,
+    paddingRight: space.md,
+    paddingVertical: space.sm,
+    backgroundColor: colors.bg,
+    gap: space.xs,
   },
   backIconBtn: {
-    width: 32,
-    height: 32,
-    borderRadius: 8,
-    backgroundColor: "#1f2937",
+    width: touch,
+    height: touch,
+    borderRadius: radius.pill,
     alignItems: "center",
     justifyContent: "center",
-    borderWidth: 1,
-    borderColor: "#374151",
   },
   backIconText: {
-    color: "#f3f4f6",
-    fontSize: 20,
-    fontWeight: "700",
-    lineHeight: 22,
-    marginTop: -2,
+    color: colors.text,
+    fontSize: 30,
+    fontWeight: "300",
+    lineHeight: 32,
+    marginTop: -3,
   },
   titleBlock: {
     flex: 1,
     minWidth: 0,
-    gap: 1,
+    minHeight: touch,
+    justifyContent: "center",
+    gap: 2,
   },
   titleLine: {
     flexDirection: "row",
@@ -1487,72 +1490,73 @@ const styles = StyleSheet.create({
     gap: 6,
   },
   statusDot: {
-    width: 7,
-    height: 7,
+    width: 8,
+    height: 8,
     borderRadius: 4,
   },
   sessionTitle: {
     flexShrink: 1,
-    color: "#f9fafb",
-    fontSize: 14,
-    fontWeight: "700",
+    color: colors.text,
+    fontSize: font.title,
+    fontWeight: "600",
   },
   editHintIcon: {
-    color: "#6b7280",
-    fontSize: 11,
+    color: colors.textFaint,
+    fontSize: font.caption,
   },
   cwdText: {
-    color: "#9ca3af",
+    color: colors.textMuted,
     fontFamily: MONO_FONT,
-    fontSize: 10,
+    fontSize: font.caption,
   },
   tabGroup: {
     flexDirection: "row",
     flexShrink: 0,
-    backgroundColor: "#0b0e14",
-    borderRadius: 8,
-    padding: 2,
-    borderWidth: 1,
-    borderColor: "#262d3d",
+    backgroundColor: colors.surface,
+    borderRadius: radius.pill,
+    padding: 3,
   },
   tabBtn: {
-    paddingHorizontal: 8,
-    paddingVertical: 5,
-    borderRadius: 6,
+    minHeight: 34,
+    justifyContent: "center",
+    paddingHorizontal: space.md,
+    borderRadius: radius.pill,
   },
   tabBtnActive: {
-    backgroundColor: "#2563eb",
+    backgroundColor: colors.surfaceRaised,
   },
   tabBtnText: {
-    color: "#9ca3af",
-    fontSize: 11,
-    fontWeight: "600",
+    color: colors.textMuted,
+    fontSize: font.small,
+    fontWeight: "500",
   },
   tabBtnTextActive: {
-    color: "#ffffff",
+    color: colors.text,
+    fontWeight: "600",
   },
   telemetryBar: {
     flexDirection: "row",
     alignItems: "center",
     justifyContent: "space-between",
-    paddingHorizontal: 12,
-    paddingVertical: 5,
-    backgroundColor: "#10141d",
-    borderBottomWidth: 1,
-    borderBottomColor: "#1f2430",
-    gap: 8,
+    paddingHorizontal: space.lg,
+    paddingBottom: space.sm,
+    backgroundColor: colors.bg,
+    borderBottomWidth: StyleSheet.hairlineWidth,
+    borderBottomColor: colors.border,
+    gap: space.sm,
   },
   ctxSummaryPress: {
     flex: 1,
     flexDirection: "row",
     alignItems: "center",
-    gap: 7,
+    gap: space.sm,
     minWidth: 0,
+    minHeight: 32,
   },
   miniProgressTrack: {
-    width: 32,
-    height: 5,
-    backgroundColor: "#1f2937",
+    width: 40,
+    height: 6,
+    backgroundColor: colors.surfaceRaised,
     borderRadius: 3,
     overflow: "hidden",
   },
@@ -1562,541 +1566,531 @@ const styles = StyleSheet.create({
   },
   ctxMetaText: {
     flex: 1,
-    color: "#9ca3af",
-    fontFamily: MONO_FONT,
-    fontSize: 10,
+    color: colors.textMuted,
+    fontSize: font.caption,
   },
   telemetryActions: {
     flexDirection: "row",
     alignItems: "center",
-    gap: 6,
+    gap: space.sm,
   },
   miniIconPill: {
-    height: 22,
-    paddingHorizontal: 8,
-    borderRadius: 6,
-    backgroundColor: "#182030",
-    borderWidth: 1,
-    borderColor: "#283246",
+    height: 32,
+    paddingHorizontal: space.md,
+    borderRadius: radius.pill,
+    backgroundColor: colors.surface,
     alignItems: "center",
     justifyContent: "center",
   },
   miniIconPillActive: {
-    backgroundColor: "#1e3a8a",
-    borderColor: "#60a5fa",
+    backgroundColor: colors.accentSoft,
   },
   miniIconPillText: {
-    color: "#cbd5e1",
-    fontSize: 10,
-    fontWeight: "600",
+    color: colors.textMuted,
+    fontSize: font.caption,
+    fontWeight: "500",
   },
   topPopoverCard: {
-    backgroundColor: "#131824",
-    borderBottomWidth: 1,
-    borderBottomColor: "#2e3646",
-    paddingHorizontal: 12,
-    paddingVertical: 10,
-    gap: 8,
+    backgroundColor: colors.surface,
+    marginHorizontal: space.md,
+    marginTop: space.sm,
+    borderRadius: radius.lg,
+    padding: space.lg,
+    gap: space.md,
   },
   popoverHeaderRow: {
     flexDirection: "row",
     alignItems: "center",
     justifyContent: "space-between",
+    minHeight: 32,
   },
   popoverTitle: {
-    color: "#60a5fa",
-    fontSize: 10,
-    fontWeight: "700",
-    letterSpacing: 0.6,
+    flexShrink: 1,
+    color: colors.text,
+    fontSize: font.body,
+    fontWeight: "600",
   },
   popoverCloseText: {
-    color: "#9ca3af",
-    fontSize: 13,
-    fontWeight: "700",
-    paddingHorizontal: 4,
+    color: colors.textMuted,
+    fontSize: 18,
+    paddingHorizontal: space.sm,
+    paddingVertical: space.xs,
   },
   renameRow: {
     flexDirection: "row",
     alignItems: "center",
-    gap: 8,
+    gap: space.sm,
   },
   popoverInput: {
-    backgroundColor: "#0b0e14",
+    minHeight: touch,
+    backgroundColor: colors.surfaceSunken,
     borderWidth: 1,
-    borderColor: "#2e3646",
-    borderRadius: 7,
-    paddingHorizontal: 10,
-    paddingVertical: 6,
-    color: "#f9fafb",
-    fontSize: 12,
+    borderColor: colors.border,
+    borderRadius: radius.md,
+    paddingHorizontal: space.md,
+    paddingVertical: space.sm,
+    color: colors.text,
+    fontSize: font.body,
   },
   popoverPrimaryBtn: {
-    height: 32,
-    backgroundColor: "#2563eb",
-    paddingHorizontal: 12,
-    borderRadius: 7,
+    minHeight: touch,
+    backgroundColor: colors.accent,
+    paddingHorizontal: space.lg,
+    borderRadius: radius.md,
     alignItems: "center",
     justifyContent: "center",
   },
+  popoverDangerBtn: {
+    backgroundColor: colors.danger,
+  },
   popoverPrimaryBtnText: {
-    color: "#ffffff",
-    fontSize: 12,
-    fontWeight: "700",
+    color: colors.onAccent,
+    fontSize: font.body,
+    fontWeight: "600",
   },
   cwdSwitchRow: {
     flexDirection: "row",
     alignItems: "center",
     justifyContent: "space-between",
-    gap: 8,
+    gap: space.sm,
   },
   cwdDrawerText: {
     flex: 1,
-    color: "#9ca3af",
+    color: colors.textMuted,
     fontFamily: MONO_FONT,
-    fontSize: 11,
+    fontSize: font.caption,
   },
   popoverSecondaryBtn: {
-    backgroundColor: "#1f2937",
-    paddingHorizontal: 10,
-    paddingVertical: 5,
-    borderRadius: 6,
-    borderWidth: 1,
-    borderColor: "#374151",
+    minHeight: 40,
+    justifyContent: "center",
+    backgroundColor: colors.surfaceRaised,
+    paddingHorizontal: space.md,
+    borderRadius: radius.md,
   },
   popoverSecondaryBtnText: {
-    color: "#93c5fd",
-    fontSize: 11,
-    fontWeight: "600",
+    color: colors.accentText,
+    fontSize: font.small,
+    fontWeight: "500",
   },
-  usageBreakdownText: {
-    color: "#d1d5db",
+  usageGrid: {
+    gap: 6,
+  },
+  usageRow: {
+    flexDirection: "row",
+    justifyContent: "space-between",
+    gap: space.md,
+  },
+  usageLabel: {
+    color: colors.textMuted,
+    fontSize: font.small,
+  },
+  usageValue: {
+    color: colors.text,
     fontFamily: MONO_FONT,
-    fontSize: 10,
-    lineHeight: 15,
+    fontSize: font.small,
+  },
+  sheetHint: {
+    color: colors.textMuted,
+    fontSize: font.small,
+    lineHeight: 19,
   },
   filesTabContainer: {
     flex: 1,
-    padding: 12,
+    padding: space.md,
   },
   errorBanner: {
     flexDirection: "row",
     alignItems: "center",
     justifyContent: "space-between",
-    backgroundColor: "#451a1a",
-    paddingHorizontal: 12,
-    paddingVertical: 8,
-    gap: 8,
+    backgroundColor: colors.dangerSoft,
+    marginHorizontal: space.md,
+    marginTop: space.sm,
+    borderRadius: radius.md,
+    paddingLeft: space.md,
+    paddingRight: space.xs,
+    paddingVertical: space.xs,
+    gap: space.sm,
   },
   errorBannerText: {
     flex: 1,
-    color: "#fca5a5",
-    fontSize: 12,
+    color: colors.dangerText,
+    fontSize: font.small,
+    lineHeight: 18,
+    paddingVertical: space.xs,
   },
   reconnectBtn: {
-    backgroundColor: "#7f1d1d",
-    paddingHorizontal: 10,
-    paddingVertical: 4,
-    borderRadius: 5,
+    minHeight: 36,
+    justifyContent: "center",
+    paddingHorizontal: space.md,
+    borderRadius: radius.sm,
   },
   reconnectBtnText: {
-    color: "#fecaca",
-    fontSize: 11,
-    fontWeight: "700",
+    color: colors.text,
+    fontSize: font.small,
+    fontWeight: "600",
+  },
+  chatArea: {
+    flex: 1,
   },
   chatScroll: {
     flex: 1,
   },
   chatContent: {
-    padding: 12,
-    gap: 12,
-    paddingBottom: 20,
+    paddingHorizontal: space.lg,
+    paddingTop: space.lg,
+    paddingBottom: space.xl,
+    gap: space.lg,
   },
   emptyChatBox: {
-    marginTop: 48,
-    padding: 20,
-    backgroundColor: "#141821",
-    borderRadius: 10,
-    borderWidth: 1,
-    borderColor: "#262d3d",
+    marginTop: 64,
+    paddingHorizontal: space.xl,
     alignItems: "center",
-    gap: 8,
+    gap: space.sm,
   },
   emptyChatTitle: {
-    color: "#f3f4f6",
-    fontSize: 16,
-    fontWeight: "700",
+    color: colors.text,
+    fontSize: font.title,
+    fontWeight: "600",
   },
   emptyChatSub: {
-    color: "#9ca3af",
-    fontSize: 13,
+    color: colors.textMuted,
+    fontSize: font.small,
     textAlign: "center",
-    lineHeight: 19,
+    lineHeight: 20,
   },
   userRow: {
     alignItems: "flex-end",
   },
   userBubble: {
-    maxWidth: "85%",
-    backgroundColor: "#1e3a8a",
-    borderColor: "#3b82f6",
-    borderWidth: 1,
-    borderRadius: 12,
-    paddingHorizontal: 12,
-    paddingVertical: 9,
+    maxWidth: "86%",
+    backgroundColor: colors.accentSoft,
+    borderRadius: 18,
+    borderBottomRightRadius: 6,
+    paddingHorizontal: 14,
+    paddingVertical: 10,
   },
   userText: {
-    color: "#f9fafb",
-    fontSize: 14,
-    lineHeight: 20,
+    color: colors.text,
+    fontSize: font.body,
+    lineHeight: 22,
   },
   assistantBubble: {
-    backgroundColor: "#141821",
-    borderColor: "#262d3d",
-    borderWidth: 1,
-    borderRadius: 12,
-    padding: 12,
-    gap: 8,
+    gap: space.sm,
   },
   roleHeader: {
     flexDirection: "row",
     alignItems: "center",
-    justifyContent: "space-between",
+    gap: space.sm,
   },
   assistantRoleText: {
-    color: "#60a5fa",
-    fontFamily: MONO_FONT,
-    fontSize: 11,
-    fontWeight: "700",
+    color: colors.textMuted,
+    fontSize: font.caption,
+    fontWeight: "600",
   },
   streamingBadge: {
-    color: "#34d399",
-    fontFamily: MONO_FONT,
-    fontSize: 10,
-    fontWeight: "700",
+    color: colors.success,
+    fontSize: font.caption,
   },
   abortedBadge: {
-    color: "#fbbf24",
-    fontFamily: MONO_FONT,
-    fontSize: 10,
-    fontWeight: "700",
+    color: colors.warning,
+    fontSize: font.caption,
   },
   errorBadge: {
-    color: "#f87171",
-    fontFamily: MONO_FONT,
-    fontSize: 10,
-    fontWeight: "700",
+    color: colors.danger,
+    fontSize: font.caption,
   },
   thinkingBox: {
-    backgroundColor: "#0d1017",
-    borderRadius: 6,
-    borderWidth: 1,
-    borderColor: "#1f2430",
-    padding: 8,
+    borderLeftWidth: 2,
+    borderLeftColor: colors.borderStrong,
+    paddingLeft: space.md,
     gap: 6,
   },
   thinkingHeader: {
     flexDirection: "row",
     alignItems: "center",
+    minHeight: 32,
   },
   thinkingTitle: {
-    color: "#9ca3af",
-    fontFamily: MONO_FONT,
-    fontSize: 11,
+    color: colors.textMuted,
+    fontSize: font.small,
   },
   thinkingBody: {
-    color: "#9ca3af",
-    fontFamily: MONO_FONT,
-    fontSize: 11,
-    lineHeight: 16,
-  },
-  assistantText: {
-    color: "#f3f4f6",
-    fontSize: 14,
-    lineHeight: 21,
+    color: colors.textMuted,
+    fontSize: font.small,
+    lineHeight: 20,
   },
   errorMessageText: {
-    color: "#fca5a5",
+    color: colors.dangerText,
     fontFamily: MONO_FONT,
-    fontSize: 12,
+    fontSize: font.small,
+    lineHeight: 19,
   },
   systemRow: {
     alignItems: "center",
-    paddingVertical: 4,
+    paddingVertical: space.xs,
   },
   systemText: {
-    color: "#6b7280",
-    fontFamily: MONO_FONT,
-    fontSize: 11,
+    color: colors.textFaint,
+    fontSize: font.caption,
+    textAlign: "center",
   },
   retryBanner: {
-    backgroundColor: "#422006",
-    padding: 10,
-    borderRadius: 8,
+    backgroundColor: colors.warningSoft,
+    padding: space.md,
+    borderRadius: radius.md,
   },
   retryText: {
-    color: "#fde68a",
-    fontFamily: MONO_FONT,
-    fontSize: 11,
+    color: colors.warning,
+    fontSize: font.small,
+    lineHeight: 19,
   },
   composerDock: {
-    backgroundColor: "#121620",
-    borderTopWidth: 1,
-    borderTopColor: "#232a3b",
-    paddingHorizontal: 10,
-    paddingTop: 8,
-    paddingBottom: 10,
-    gap: 8,
+    backgroundColor: colors.bg,
+    paddingHorizontal: space.md,
+    paddingTop: space.sm,
+    paddingBottom: space.md,
+    gap: space.sm,
   },
   inboxQueueBox: {
-    backgroundColor: "#0d1017",
-    borderRadius: 8,
-    borderWidth: 1,
-    borderColor: "#374151",
-    padding: 8,
-    gap: 5,
+    backgroundColor: colors.surface,
+    borderRadius: radius.md,
+    padding: space.md,
+    gap: space.sm,
   },
   inboxQueueHeader: {
-    color: "#93c5fd",
-    fontFamily: MONO_FONT,
-    fontSize: 10,
-    fontWeight: "700",
+    color: colors.textMuted,
+    fontSize: font.caption,
+    fontWeight: "600",
   },
   inboxItemRow: {
     flexDirection: "row",
     alignItems: "center",
-    gap: 6,
-    backgroundColor: "#141821",
-    paddingHorizontal: 8,
-    paddingVertical: 5,
-    borderRadius: 5,
+    gap: space.sm,
+    minHeight: 36,
   },
   inboxTimingBadge: {
-    color: "#fbbf24",
-    fontFamily: MONO_FONT,
-    fontSize: 9,
-    fontWeight: "700",
+    color: colors.warning,
+    backgroundColor: colors.warningSoft,
+    fontSize: font.caption,
+    fontWeight: "600",
+    paddingHorizontal: space.sm,
+    paddingVertical: 2,
+    borderRadius: radius.pill,
+    overflow: "hidden",
   },
   inboxItemText: {
     flex: 1,
-    color: "#e5e7eb",
-    fontSize: 12,
+    color: colors.text,
+    fontSize: font.small,
   },
   inboxAbortBtn: {
-    backgroundColor: "#7f1d1d",
-    paddingHorizontal: 7,
-    paddingVertical: 3,
-    borderRadius: 4,
+    minHeight: 32,
+    justifyContent: "center",
+    paddingHorizontal: space.sm,
   },
   inboxAbortText: {
-    color: "#fecaca",
-    fontSize: 10,
-    fontWeight: "700",
+    color: colors.dangerText,
+    fontSize: font.small,
+    fontWeight: "500",
   },
   bottomSheetCard: {
-    backgroundColor: "#0d111a",
-    borderRadius: 12,
-    borderWidth: 1,
-    borderColor: "#2b3548",
-    padding: 10,
-    gap: 8,
+    backgroundColor: colors.surface,
+    borderRadius: radius.lg,
+    padding: space.md,
+    gap: space.md,
   },
   quickActionsGrid: {
     flexDirection: "row",
     flexWrap: "wrap",
-    gap: 6,
+    gap: space.sm,
   },
   quickActionTile: {
+    flexGrow: 1,
+    flexBasis: "45%",
     flexDirection: "row",
     alignItems: "center",
-    gap: 6,
-    backgroundColor: "#161c2a",
-    borderWidth: 1,
-    borderColor: "#283246",
-    borderRadius: 8,
-    paddingHorizontal: 10,
-    paddingVertical: 7,
+    gap: space.sm,
+    minHeight: touch + 4,
+    backgroundColor: colors.surfaceRaised,
+    borderRadius: radius.md,
+    paddingHorizontal: space.md,
   },
   quickActionIcon: {
-    color: "#60a5fa",
-    fontFamily: MONO_FONT,
-    fontSize: 13,
+    width: 20,
+    textAlign: "center",
+    color: colors.accentText,
+    fontSize: font.body,
     fontWeight: "700",
   },
   quickActionLabel: {
-    color: "#e5e7eb",
-    fontSize: 12,
-    fontWeight: "600",
+    color: colors.text,
+    fontSize: font.small,
+    fontWeight: "500",
   },
   inlineHeaderLeft: {
     flex: 1,
     flexDirection: "row",
     alignItems: "center",
-    gap: 6,
+    gap: space.sm,
     minWidth: 0,
   },
   quickUpBtn: {
     flexShrink: 0,
-    backgroundColor: "#1e293b",
-    borderWidth: 1,
-    borderColor: "#334155",
-    borderRadius: 5,
-    paddingHorizontal: 7,
-    paddingVertical: 3,
+    minHeight: 32,
+    justifyContent: "center",
+    backgroundColor: colors.surfaceRaised,
+    borderRadius: radius.sm,
+    paddingHorizontal: space.sm,
   },
   quickUpBtnText: {
-    color: "#93c5fd",
-    fontSize: 10,
-    fontWeight: "700",
+    color: colors.accentText,
+    fontSize: font.small,
+    fontWeight: "500",
   },
   inlineHeaderRight: {
     flexShrink: 0,
     flexDirection: "row",
     alignItems: "center",
-    gap: 8,
+    gap: space.sm,
   },
   mentionCurrentDirBtn: {
-    backgroundColor: "#1e3a8a",
-    borderWidth: 1,
-    borderColor: "#3b82f6",
-    borderRadius: 5,
-    paddingHorizontal: 7,
-    paddingVertical: 3,
+    minHeight: 32,
+    justifyContent: "center",
+    backgroundColor: colors.accentSoft,
+    borderRadius: radius.sm,
+    paddingHorizontal: space.sm,
   },
   mentionCurrentDirText: {
-    color: "#dbeafe",
-    fontFamily: MONO_FONT,
-    fontSize: 10,
-    fontWeight: "700",
-  },
-  fullBrowserLink: {
-    color: "#93c5fd",
-    fontSize: 11,
+    color: colors.accentText,
+    fontSize: font.caption,
     fontWeight: "600",
   },
+  fullBrowserLink: {
+    color: colors.accentText,
+    fontSize: font.small,
+    fontWeight: "500",
+    paddingVertical: space.xs,
+  },
   quickMentionScroll: {
-    maxHeight: 145,
+    maxHeight: 200,
   },
   quickMentionList: {
     flexDirection: "row",
     flexWrap: "wrap",
-    gap: 6,
+    gap: space.sm,
   },
   quickDirGroup: {
     flexDirection: "row",
     alignItems: "center",
-    backgroundColor: "#141c2e",
-    borderWidth: 1,
-    borderColor: "#2b3b5c",
-    borderRadius: 6,
+    backgroundColor: colors.surfaceRaised,
+    borderRadius: radius.sm,
     overflow: "hidden",
   },
   quickDirMainPress: {
-    paddingHorizontal: 8,
-    paddingVertical: 5,
+    minHeight: 36,
+    justifyContent: "center",
+    paddingHorizontal: space.md,
   },
   quickDirText: {
-    color: "#93c5fd",
+    color: colors.accentText,
     fontFamily: MONO_FONT,
-    fontSize: 11,
-    fontWeight: "600",
+    fontSize: font.small,
   },
   quickDirAtBtn: {
-    backgroundColor: "#1e3a8a",
-    paddingHorizontal: 7,
-    paddingVertical: 5,
-    borderLeftWidth: 1,
-    borderLeftColor: "#2b3b5c",
+    minHeight: 36,
+    justifyContent: "center",
+    backgroundColor: colors.accentSoft,
+    paddingHorizontal: space.md,
   },
   quickDirAtText: {
-    color: "#dbeafe",
+    color: colors.accentText,
     fontFamily: MONO_FONT,
-    fontSize: 10,
+    fontSize: font.small,
     fontWeight: "700",
   },
   quickMentionChip: {
-    backgroundColor: "#151c2c",
-    borderWidth: 1,
-    borderColor: "#29354d",
-    borderRadius: 6,
-    paddingHorizontal: 8,
-    paddingVertical: 5,
+    minHeight: 36,
+    justifyContent: "center",
+    backgroundColor: colors.surfaceRaised,
+    borderRadius: radius.sm,
+    paddingHorizontal: space.md,
   },
   quickMentionChipText: {
-    color: "#dbeafe",
+    color: colors.text,
     fontFamily: MONO_FONT,
-    fontSize: 11,
+    fontSize: font.small,
   },
   emptyQuickText: {
-    color: "#6b7280",
-    fontSize: 11,
-    fontStyle: "italic",
+    color: colors.textFaint,
+    fontSize: font.small,
   },
   drawerPillsRow: {
-    gap: 6,
+    gap: space.sm,
     paddingVertical: 2,
   },
   drawerPill: {
-    paddingHorizontal: 10,
-    paddingVertical: 6,
-    borderRadius: 6,
-    backgroundColor: "#141821",
+    minHeight: 40,
+    justifyContent: "center",
+    paddingHorizontal: space.md,
+    borderRadius: radius.pill,
+    backgroundColor: colors.surfaceRaised,
     borderWidth: 1,
-    borderColor: "#262d3d",
+    borderColor: "transparent",
   },
   drawerPillActive: {
-    backgroundColor: "#1e3a8a",
-    borderColor: "#60a5fa",
+    backgroundColor: colors.accentSoft,
+    borderColor: colors.accent,
   },
   drawerPillText: {
-    color: "#9ca3af",
-    fontFamily: MONO_FONT,
-    fontSize: 11,
+    color: colors.textMuted,
+    fontSize: font.small,
   },
   drawerPillTextActive: {
-    color: "#ffffff",
-    fontWeight: "700",
+    color: colors.text,
+    fontWeight: "600",
   },
   drawerThinkingRow: {
     flexDirection: "row",
     flexWrap: "wrap",
-    gap: 6,
+    gap: space.sm,
   },
   drawerThinkingPill: {
-    paddingHorizontal: 9,
-    paddingVertical: 5,
-    borderRadius: 5,
-    backgroundColor: "#141821",
+    minHeight: 36,
+    justifyContent: "center",
+    paddingHorizontal: space.md,
+    borderRadius: radius.pill,
+    backgroundColor: colors.surfaceRaised,
     borderWidth: 1,
-    borderColor: "#262d3d",
+    borderColor: "transparent",
   },
   drawerThinkingPillActive: {
-    backgroundColor: "#065f46",
-    borderColor: "#34d399",
+    backgroundColor: colors.accentSoft,
+    borderColor: colors.accent,
   },
   composerCard: {
-    backgroundColor: "#0b0e14",
-    borderRadius: 14,
+    backgroundColor: colors.surface,
+    borderRadius: 22,
     borderWidth: 1,
-    borderColor: "#2a3346",
-    paddingHorizontal: 10,
-    paddingTop: 8,
-    paddingBottom: 8,
-    gap: 8,
+    borderColor: colors.border,
+    paddingHorizontal: space.md,
+    paddingTop: space.md,
+    paddingBottom: space.sm,
+    gap: space.sm,
   },
   chatInput: {
-    color: "#f9fafb",
-    fontSize: 14,
-    lineHeight: 20,
+    color: colors.text,
+    fontSize: font.body,
+    lineHeight: 22,
     minHeight: 26,
-    maxHeight: 110,
-    paddingHorizontal: 2,
+    maxHeight: 140,
+    paddingHorizontal: space.xs,
     paddingVertical: 0,
   },
   composerToolbar: {
     flexDirection: "row",
     alignItems: "center",
     justifyContent: "space-between",
-    gap: 6,
+    gap: space.sm,
   },
   composerToolsLeft: {
     flex: 1,
@@ -2106,18 +2100,16 @@ const styles = StyleSheet.create({
     minWidth: 0,
   },
   toolCircleBtn: {
-    width: 30,
-    height: 30,
-    borderRadius: 15,
-    backgroundColor: "#172030",
-    borderWidth: 1,
-    borderColor: "#2d3a52",
+    width: 38,
+    height: 38,
+    borderRadius: 19,
+    backgroundColor: colors.surfaceRaised,
     alignItems: "center",
     justifyContent: "center",
   },
   plusIconBox: {
-    width: 12,
-    height: 12,
+    width: 14,
+    height: 14,
     alignItems: "center",
     justifyContent: "center",
   },
@@ -2126,54 +2118,47 @@ const styles = StyleSheet.create({
   },
   plusBarH: {
     position: "absolute",
-    width: 12,
+    width: 14,
     height: 2,
     borderRadius: 1,
-    backgroundColor: "#93c5fd",
+    backgroundColor: colors.textMuted,
   },
   plusBarV: {
     position: "absolute",
     width: 2,
-    height: 12,
+    height: 14,
     borderRadius: 1,
-    backgroundColor: "#93c5fd",
+    backgroundColor: colors.textMuted,
   },
   toolAtBtnText: {
-    color: "#93c5fd",
-    fontFamily: MONO_FONT,
-    fontSize: 13,
-    fontWeight: "700",
-    lineHeight: 15,
+    color: colors.textMuted,
+    fontSize: 17,
+    fontWeight: "600",
+    lineHeight: 20,
     textAlign: "center",
     includeFontPadding: false,
-    transform: [{ translateY: -0.5 }],
   },
   toolPillBtn: {
-    height: 30,
-    paddingHorizontal: 10,
-    borderRadius: 15,
-    backgroundColor: "#172030",
-    borderWidth: 1,
-    borderColor: "#2d3a52",
+    height: 38,
+    paddingHorizontal: space.md,
+    borderRadius: 19,
+    backgroundColor: colors.surfaceRaised,
     alignItems: "center",
     justifyContent: "center",
     flexShrink: 1,
   },
   toolPillBtnActive: {
-    backgroundColor: "#1e3a8a",
-    borderColor: "#60a5fa",
+    backgroundColor: colors.accentSoft,
   },
   toolPillBtnText: {
-    color: "#93c5fd",
-    fontFamily: MONO_FONT,
-    fontSize: 11,
-    fontWeight: "700",
+    color: colors.accentText,
+    fontSize: font.caption,
+    fontWeight: "600",
   },
   toolPillModelText: {
-    color: "#cbd5e1",
-    fontFamily: MONO_FONT,
-    fontSize: 11,
-    fontWeight: "600",
+    color: colors.textMuted,
+    fontSize: font.caption,
+    fontWeight: "500",
   },
   composerToolsRight: {
     flexDirection: "row",
@@ -2182,62 +2167,67 @@ const styles = StyleSheet.create({
     flexShrink: 0,
   },
   sendPillBtn: {
-    height: 30,
-    paddingHorizontal: 14,
-    borderRadius: 15,
-    backgroundColor: "#2563eb",
+    width: 38,
+    height: 38,
+    borderRadius: 19,
+    backgroundColor: colors.accent,
     alignItems: "center",
     justifyContent: "center",
   },
   sendPillBtnDisabled: {
-    backgroundColor: "#1e293b",
-    opacity: 0.6,
+    backgroundColor: colors.surfaceRaised,
+  },
+  sendIconText: {
+    color: colors.onAccent,
+    fontSize: 20,
+    fontWeight: "700",
+    lineHeight: 22,
+    includeFontPadding: false,
   },
   sendPillText: {
-    color: "#ffffff",
-    fontSize: 12,
-    fontWeight: "700",
+    color: colors.onAccent,
+    fontSize: font.small,
+    fontWeight: "600",
   },
   steerPillBtn: {
-    height: 30,
-    paddingHorizontal: 10,
-    borderRadius: 15,
-    backgroundColor: "#d97706",
+    height: 38,
+    paddingHorizontal: 14,
+    borderRadius: 19,
+    backgroundColor: colors.accent,
     alignItems: "center",
     justifyContent: "center",
   },
   queuePillBtn: {
-    height: 30,
-    paddingHorizontal: 10,
-    borderRadius: 15,
-    backgroundColor: "#374151",
+    height: 38,
+    paddingHorizontal: 14,
+    borderRadius: 19,
+    backgroundColor: colors.surfaceRaised,
     alignItems: "center",
     justifyContent: "center",
   },
   queuePillText: {
-    color: "#e5e7eb",
-    fontSize: 11,
-    fontWeight: "600",
+    color: colors.text,
+    fontSize: font.small,
+    fontWeight: "500",
   },
   stopPillBtn: {
-    height: 30,
-    paddingHorizontal: 11,
-    borderRadius: 15,
-    backgroundColor: "#dc2626",
+    height: 38,
+    paddingHorizontal: 14,
+    borderRadius: 19,
+    backgroundColor: colors.danger,
     alignItems: "center",
     justifyContent: "center",
   },
   failedDraftBox: {
-    backgroundColor: "#2a1215",
-    borderWidth: 1,
-    borderColor: "#7f1d1d",
-    borderRadius: 10,
-    paddingHorizontal: 10,
-    paddingVertical: 8,
+    backgroundColor: colors.dangerSoft,
+    borderRadius: radius.md,
+    paddingLeft: space.md,
+    paddingRight: space.xs,
+    paddingVertical: space.sm,
     flexDirection: "row",
     alignItems: "center",
     justifyContent: "space-between",
-    gap: 8,
+    gap: space.sm,
   },
   failedDraftTextCol: {
     flex: 1,
@@ -2245,52 +2235,51 @@ const styles = StyleSheet.create({
     gap: 2,
   },
   failedDraftTitle: {
-    color: "#fca5a5",
-    fontSize: 10,
-    fontWeight: "700",
+    color: colors.dangerText,
+    fontSize: font.caption,
+    fontWeight: "600",
   },
   failedDraftPreview: {
-    color: "#fecaca",
-    fontFamily: MONO_FONT,
-    fontSize: 11,
+    color: colors.text,
+    fontSize: font.small,
   },
   failedDraftActions: {
     flexDirection: "row",
     alignItems: "center",
-    gap: 6,
+    gap: 2,
     flexShrink: 0,
   },
   failedRetryBtn: {
-    backgroundColor: "#b91c1c",
-    paddingHorizontal: 8,
-    paddingVertical: 5,
-    borderRadius: 6,
+    minHeight: 36,
+    justifyContent: "center",
+    backgroundColor: colors.danger,
+    paddingHorizontal: space.md,
+    borderRadius: radius.sm,
   },
   failedRetryBtnText: {
-    color: "#ffffff",
-    fontSize: 11,
-    fontWeight: "700",
-  },
-  failedRestoreBtn: {
-    backgroundColor: "#1f2937",
-    borderWidth: 1,
-    borderColor: "#374151",
-    paddingHorizontal: 8,
-    paddingVertical: 5,
-    borderRadius: 6,
-  },
-  failedRestoreBtnText: {
-    color: "#e5e7eb",
-    fontSize: 11,
+    color: colors.onAccent,
+    fontSize: font.small,
     fontWeight: "600",
   },
+  failedRestoreBtn: {
+    minHeight: 36,
+    justifyContent: "center",
+    paddingHorizontal: space.md,
+    borderRadius: radius.sm,
+  },
+  failedRestoreBtnText: {
+    color: colors.text,
+    fontSize: font.small,
+    fontWeight: "500",
+  },
   failedDismissBtn: {
-    paddingHorizontal: 5,
-    paddingVertical: 4,
+    minWidth: 36,
+    minHeight: 36,
+    alignItems: "center",
+    justifyContent: "center",
   },
   failedDismissBtnText: {
-    color: "#fca5a5",
-    fontSize: 12,
-    fontWeight: "700",
+    color: colors.dangerText,
+    fontSize: font.body,
   },
 });

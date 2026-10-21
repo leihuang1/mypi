@@ -1,6 +1,7 @@
 import React, { useRef, useState } from "react";
 import {
   ActivityIndicator,
+  Alert,
   Modal,
   Platform,
   Pressable,
@@ -17,12 +18,7 @@ import {
   parsePairingInput,
 } from "@mypi/shared";
 import type { SavedServerProfile } from "../store/server-store";
-
-const MONO_FONT = Platform.select({
-  ios: "Menlo",
-  android: "monospace",
-  default: "monospace",
-});
+import { colors, font, MONO_FONT, radius, space, touch } from "../theme";
 
 export function PairServerScreen({
   savedServers,
@@ -140,16 +136,16 @@ export function PairServerScreen({
   return (
     <ScrollView style={styles.container} contentContainerStyle={styles.content}>
       <View style={styles.headerRow}>
-        <Text style={styles.title}>Connect to MyPi Daemon</Text>
+        <Text style={styles.title}>Connect a server</Text>
         {onCancel && (
-          <Pressable onPress={onCancel} style={styles.closeBtn}>
-            <Text style={styles.closeBtnText}>Close</Text>
+          <Pressable onPress={onCancel} style={styles.closeBtn} accessibilityLabel="Close">
+            <Text style={styles.closeBtnText}>Done</Text>
           </Pressable>
         )}
       </View>
 
       <Text style={styles.subtitle}>
-        Run `npm run server:start` on your dev machine. Scan the QR code printed in your terminal or connect manually below.
+        Run <Text style={styles.code}>npm run server:start</Text> on your dev machine, then scan the QR code it prints.
       </Text>
 
       {/* Camera QR Scanner Modal */}
@@ -160,12 +156,12 @@ export function PairServerScreen({
       >
         <View style={styles.scannerContainer}>
           <View style={styles.scannerHeader}>
-            <Text style={styles.scannerTitle}>Scan Terminal QR Code</Text>
+            <Text style={styles.scannerTitle}>Scan QR code</Text>
             <Pressable
               style={styles.scannerCloseBtn}
               onPress={() => setScannerOpen(false)}
             >
-              <Text style={styles.scannerCloseText}>✕ Cancel</Text>
+              <Text style={styles.scannerCloseText}>Cancel</Text>
             </Pressable>
           </View>
 
@@ -181,7 +177,7 @@ export function PairServerScreen({
             <View style={styles.scanOverlay}>
               <View style={styles.scanFrame} />
               <Text style={styles.scanHint}>
-                Point your camera at the QR code shown by `npm run server:start`
+                Point the camera at the QR code in your terminal
               </Text>
             </View>
           </View>
@@ -189,18 +185,18 @@ export function PairServerScreen({
       </Modal>
 
       <View style={styles.card}>
-        <Text style={styles.label}>QUICK PAIR (QR SCAN OR PASTE URI)</Text>
+        <Text style={styles.label}>Quick pair</Text>
 
         {Platform.OS !== "web" && (
           <Pressable style={styles.scanBtn} onPress={handleOpenScanner}>
-            <Text style={styles.scanBtnText}>📷 Scan Terminal QR Code</Text>
+            <Text style={styles.scanBtnText}>Scan QR code</Text>
           </Pressable>
         )}
 
         <TextInput
           style={styles.input}
-          placeholder="Or paste mypi://connect?url=...&token=..."
-          placeholderTextColor="#4b5563"
+          placeholder="…or paste a mypi://connect link"
+          placeholderTextColor={colors.textFaint}
           value={pairingInput}
           onChangeText={(txt) => handleApplyUri(txt, false)}
           autoCapitalize="none"
@@ -209,17 +205,14 @@ export function PairServerScreen({
       </View>
 
       <View style={styles.card}>
-        <Text style={styles.label}>SERVER DETAILS</Text>
+        <Text style={styles.label}>Manual setup</Text>
 
-        <Text style={styles.fieldLabel}>Server URL (Tap preset or edit)</Text>
+        <Text style={styles.fieldLabel}>Server URL</Text>
         <View style={styles.presetRow}>
           {[
-            { label: "USB (127.0.0.1)", val: "http://127.0.0.1:4780" },
-            { label: "Wi-Fi (192.168.75.84)", val: "http://192.168.75.84:4780" },
-            {
-              label: "Tailscale (100.125.236.126)",
-              val: "http://100.125.236.126:4780",
-            },
+            { label: "USB", val: "http://127.0.0.1:4780" },
+            { label: "Wi-Fi", val: "http://192.168.75.84:4780" },
+            { label: "Tailscale", val: "http://100.125.236.126:4780" },
           ].map((preset) => (
             <Pressable
               key={preset.val}
@@ -229,36 +222,36 @@ export function PairServerScreen({
                 url === preset.val ? styles.presetBtnActive : null,
               ]}
             >
-              <Text style={styles.presetBtnText}>{preset.label}</Text>
+              <Text style={[styles.presetBtnText, url === preset.val ? styles.presetBtnTextActive : null]}>{preset.label}</Text>
             </Pressable>
           ))}
         </View>
         <TextInput
           style={styles.input}
           placeholder="http://192.168.1.10:4780 or http://100.x.y.z:4780"
-          placeholderTextColor="#4b5563"
+          placeholderTextColor={colors.textFaint}
           value={url}
           onChangeText={setUrl}
           autoCapitalize="none"
           autoCorrect={false}
         />
 
-        <Text style={styles.fieldLabel}>Bearer Token</Text>
+        <Text style={styles.fieldLabel}>Bearer token</Text>
         <TextInput
           style={styles.input}
           placeholder="mypi_..."
-          placeholderTextColor="#4b5563"
+          placeholderTextColor={colors.textFaint}
           value={token}
           onChangeText={setToken}
           autoCapitalize="none"
           autoCorrect={false}
         />
 
-        <Text style={styles.fieldLabel}>Display Name (Optional)</Text>
+        <Text style={styles.fieldLabel}>Display name (optional)</Text>
         <TextInput
           style={styles.input}
           placeholder="MacBook Pro"
-          placeholderTextColor="#4b5563"
+          placeholderTextColor={colors.textFaint}
           value={name}
           onChangeText={setName}
         />
@@ -271,16 +264,16 @@ export function PairServerScreen({
           disabled={testing}
         >
           {testing ? (
-            <ActivityIndicator color="#ffffff" size="small" />
+            <ActivityIndicator color={colors.onAccent} size="small" />
           ) : (
-            <Text style={styles.primaryBtnText}>Test & Connect</Text>
+            <Text style={styles.primaryBtnText}>Test & connect</Text>
           )}
         </Pressable>
       </View>
 
       {savedServers.length > 0 && (
         <View style={styles.card}>
-          <Text style={styles.label}>SAVED SERVERS</Text>
+          <Text style={styles.label}>Saved servers</Text>
           {savedServers.map((srv) => {
             const isActive = srv.id === activeServerId;
             return (
@@ -295,16 +288,25 @@ export function PairServerScreen({
                   style={styles.savedMain}
                   onPress={() => onSelectServer(srv.id)}
                 >
-                  <Text style={styles.savedName} numberOfLines={1}>
-                    {srv.name} {isActive ? "• ACTIVE" : ""}
-                  </Text>
+                  <View style={styles.savedNameRow}>
+                    <Text style={styles.savedName} numberOfLines={1}>
+                      {srv.name}
+                    </Text>
+                    {isActive && <Text style={styles.activeBadge}>Active</Text>}
+                  </View>
                   <Text style={styles.savedUrl} numberOfLines={1}>
                     {srv.url}
                   </Text>
                 </Pressable>
                 <Pressable
                   style={styles.deleteBtn}
-                  onPress={() => onDeleteServer(srv.id)}
+                  onPress={() =>
+                    Alert.alert("Remove server?", `"${srv.name}" and its token will be removed from this phone.`, [
+                      { text: "Cancel", style: "cancel" },
+                      { text: "Remove", style: "destructive", onPress: () => void onDeleteServer(srv.id) },
+                    ])
+                  }
+                  accessibilityLabel={`Remove ${srv.name}`}
                 >
                   <Text style={styles.deleteBtnText}>Remove</Text>
                 </Pressable>
@@ -320,193 +322,222 @@ export function PairServerScreen({
 const styles = StyleSheet.create({
   container: {
     flex: 1,
-    backgroundColor: "#0b0e14",
+    backgroundColor: colors.bg,
   },
   content: {
-    padding: 16,
-    gap: 16,
-    paddingBottom: 40,
+    padding: space.lg,
+    gap: space.lg,
+    paddingBottom: 48,
   },
   headerRow: {
     flexDirection: "row",
     justifyContent: "space-between",
     alignItems: "center",
+    gap: space.md,
   },
   title: {
-    color: "#f9fafb",
-    fontSize: 20,
+    flex: 1,
+    color: colors.text,
+    fontSize: font.heading,
     fontWeight: "700",
-  },
-  closeBtn: {
-    paddingHorizontal: 12,
-    paddingVertical: 6,
-    backgroundColor: "#1f2937",
-    borderRadius: 6,
-  },
-  closeBtnText: {
-    color: "#d1d5db",
-    fontSize: 13,
-    fontWeight: "600",
-  },
-  subtitle: {
-    color: "#9ca3af",
-    fontSize: 13,
-    lineHeight: 19,
   },
   card: {
-    backgroundColor: "#141821",
-    borderRadius: 10,
-    borderWidth: 1,
-    borderColor: "#262d3d",
-    padding: 14,
-    gap: 10,
-  },
-  label: {
-    color: "#60a5fa",
-    fontSize: 11,
-    fontWeight: "700",
-    letterSpacing: 0.8,
-  },
-  scanBtn: {
-    backgroundColor: "#059669",
-    paddingVertical: 12,
-    borderRadius: 8,
-    alignItems: "center",
-    borderWidth: 1,
-    borderColor: "#10b981",
-  },
-  scanBtnText: {
-    color: "#ffffff",
-    fontSize: 14,
-    fontWeight: "700",
-  },
-  presetRow: {
-    flexDirection: "row",
-    flexWrap: "wrap",
-    gap: 6,
-  },
-  presetBtn: {
-    backgroundColor: "#0d1017",
-    borderColor: "#262d3d",
-    borderWidth: 1,
-    borderRadius: 6,
-    paddingHorizontal: 8,
-    paddingVertical: 5,
-  },
-  presetBtnActive: {
-    backgroundColor: "#1e3a8a",
-    borderColor: "#60a5fa",
-  },
-  presetBtnText: {
-    color: "#e5e7eb",
-    fontSize: 11,
-    fontWeight: "600",
+    backgroundColor: colors.surface,
+    borderRadius: radius.lg,
+    padding: space.lg,
+    gap: space.md,
   },
   fieldLabel: {
-    color: "#d1d5db",
-    fontSize: 12,
-    fontWeight: "600",
-    marginTop: 4,
-  },
-  input: {
-    backgroundColor: "#0b0e14",
-    borderWidth: 1,
-    borderColor: "#2e3646",
-    borderRadius: 8,
-    paddingHorizontal: 12,
-    paddingVertical: 10,
-    color: "#f3f4f6",
-    fontFamily: MONO_FONT,
-    fontSize: 13,
+    color: colors.textMuted,
+    fontSize: font.small,
+    fontWeight: "500",
+    marginTop: space.xs,
+    marginBottom: -space.xs,
   },
   errorText: {
-    color: "#f87171",
-    fontSize: 12,
-    marginTop: 4,
-  },
-  primaryBtn: {
-    backgroundColor: "#2563eb",
-    paddingVertical: 12,
-    borderRadius: 8,
-    alignItems: "center",
-    marginTop: 6,
+    color: colors.dangerText,
+    fontSize: font.small,
+    lineHeight: 19,
   },
   btnDisabled: {
     opacity: 0.6,
   },
+  closeBtn: {
+    minHeight: 40,
+    justifyContent: "center",
+    paddingHorizontal: space.lg,
+    backgroundColor: colors.surface,
+    borderRadius: radius.pill,
+  },
+  closeBtnText: {
+    color: colors.text,
+    fontSize: font.body,
+    fontWeight: "500",
+  },
+  subtitle: {
+    color: colors.textMuted,
+    fontSize: font.small,
+    lineHeight: 20,
+    marginTop: -space.sm,
+  },
+  code: {
+    fontFamily: MONO_FONT,
+    color: colors.text,
+  },
+  label: {
+    color: colors.text,
+    fontSize: font.body,
+    fontWeight: "600",
+  },
+  scanBtn: {
+    minHeight: 48,
+    justifyContent: "center",
+    backgroundColor: colors.accent,
+    borderRadius: radius.md,
+    alignItems: "center",
+  },
+  scanBtnText: {
+    color: colors.onAccent,
+    fontSize: font.body,
+    fontWeight: "600",
+  },
+  presetRow: {
+    flexDirection: "row",
+    flexWrap: "wrap",
+    gap: space.sm,
+  },
+  presetBtn: {
+    minHeight: 36,
+    justifyContent: "center",
+    backgroundColor: colors.surfaceRaised,
+    borderColor: "transparent",
+    borderWidth: 1,
+    borderRadius: radius.pill,
+    paddingHorizontal: space.md,
+  },
+  presetBtnActive: {
+    backgroundColor: colors.accentSoft,
+    borderColor: colors.accent,
+  },
+  presetBtnText: {
+    color: colors.textMuted,
+    fontSize: font.small,
+    fontWeight: "500",
+  },
+  presetBtnTextActive: {
+    color: colors.text,
+  },
+  input: {
+    minHeight: 48,
+    backgroundColor: colors.surfaceSunken,
+    borderWidth: 1,
+    borderColor: colors.border,
+    borderRadius: radius.md,
+    paddingHorizontal: space.md,
+    paddingVertical: space.sm,
+    color: colors.text,
+    fontFamily: MONO_FONT,
+    fontSize: font.small,
+  },
+  primaryBtn: {
+    minHeight: 48,
+    justifyContent: "center",
+    backgroundColor: colors.accent,
+    borderRadius: radius.md,
+    alignItems: "center",
+    marginTop: space.xs,
+  },
   primaryBtnText: {
-    color: "#ffffff",
-    fontSize: 14,
-    fontWeight: "700",
+    color: colors.onAccent,
+    fontSize: font.body,
+    fontWeight: "600",
   },
   savedItem: {
     flexDirection: "row",
     alignItems: "center",
     justifyContent: "space-between",
-    padding: 10,
-    borderRadius: 8,
-    backgroundColor: "#0d1017",
+    paddingLeft: space.md,
+    borderRadius: radius.md,
+    backgroundColor: colors.surfaceRaised,
     borderWidth: 1,
-    borderColor: "#1f2937",
+    borderColor: "transparent",
   },
   savedItemActive: {
-    borderColor: "#3b82f6",
+    borderColor: colors.accent,
   },
   savedMain: {
     flex: 1,
     minWidth: 0,
-    gap: 2,
+    minHeight: 60,
+    justifyContent: "center",
+    gap: 3,
+  },
+  savedNameRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: space.sm,
   },
   savedName: {
-    color: "#f3f4f6",
-    fontSize: 14,
+    flexShrink: 1,
+    color: colors.text,
+    fontSize: font.body,
     fontWeight: "600",
   },
+  activeBadge: {
+    color: colors.accentText,
+    backgroundColor: colors.accentSoft,
+    fontSize: font.caption,
+    fontWeight: "500",
+    paddingHorizontal: space.sm,
+    paddingVertical: 1,
+    borderRadius: radius.pill,
+    overflow: "hidden",
+  },
   savedUrl: {
-    color: "#9ca3af",
+    color: colors.textMuted,
     fontFamily: MONO_FONT,
-    fontSize: 12,
+    fontSize: font.caption,
   },
   deleteBtn: {
     flexShrink: 0,
-    paddingHorizontal: 10,
-    paddingVertical: 6,
+    minHeight: touch,
+    justifyContent: "center",
+    paddingHorizontal: space.md,
   },
   deleteBtnText: {
-    color: "#f87171",
-    fontSize: 12,
-    fontWeight: "600",
+    color: colors.dangerText,
+    fontSize: font.small,
+    fontWeight: "500",
   },
   scannerContainer: {
     flex: 1,
-    backgroundColor: "#0b0e14",
+    backgroundColor: colors.bg,
   },
   scannerHeader: {
     flexDirection: "row",
     justifyContent: "space-between",
     alignItems: "center",
-    paddingHorizontal: 16,
+    paddingHorizontal: space.lg,
     paddingTop: Platform.OS === "ios" ? 54 : 20,
-    paddingBottom: 14,
-    backgroundColor: "#141821",
-    borderBottomWidth: 1,
-    borderBottomColor: "#262d3d",
+    paddingBottom: space.md,
+    backgroundColor: colors.bg,
   },
   scannerTitle: {
-    color: "#f9fafb",
-    fontSize: 18,
-    fontWeight: "700",
+    color: colors.text,
+    fontSize: font.title,
+    fontWeight: "600",
   },
   scannerCloseBtn: {
-    backgroundColor: "#374151",
-    paddingHorizontal: 12,
-    paddingVertical: 6,
-    borderRadius: 6,
+    minHeight: 40,
+    justifyContent: "center",
+    backgroundColor: colors.surface,
+    paddingHorizontal: space.lg,
+    borderRadius: radius.pill,
   },
   scannerCloseText: {
-    color: "#ffffff",
-    fontSize: 13,
-    fontWeight: "600",
+    color: colors.text,
+    fontSize: font.body,
+    fontWeight: "500",
   },
   cameraWrapper: {
     flex: 1,
@@ -516,25 +547,25 @@ const styles = StyleSheet.create({
     ...StyleSheet.absoluteFillObject,
     justifyContent: "center",
     alignItems: "center",
-    padding: 24,
+    padding: space.xl,
     gap: 20,
   },
   scanFrame: {
     width: 240,
     height: 240,
-    borderWidth: 2,
-    borderColor: "#10b981",
-    borderRadius: 16,
-    backgroundColor: "rgba(16, 185, 129, 0.05)",
+    borderWidth: 3,
+    borderColor: colors.onAccent,
+    borderRadius: 24,
   },
   scanHint: {
-    color: "#ffffff",
-    fontSize: 13,
-    fontWeight: "600",
+    color: colors.onAccent,
+    fontSize: font.small,
+    fontWeight: "500",
     textAlign: "center",
-    backgroundColor: "rgba(11, 14, 20, 0.8)",
-    paddingHorizontal: 14,
-    paddingVertical: 8,
-    borderRadius: 8,
+    backgroundColor: "rgba(0, 0, 0, 0.6)",
+    paddingHorizontal: space.lg,
+    paddingVertical: space.sm,
+    borderRadius: radius.pill,
+    overflow: "hidden",
   },
 });

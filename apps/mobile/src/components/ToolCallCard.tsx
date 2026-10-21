@@ -1,18 +1,12 @@
 import React, { useState } from "react";
 import {
-  Platform,
   Pressable,
   StyleSheet,
   Text,
   View,
 } from "react-native";
 import type { ToolCallItem } from "@mypi/shared";
-
-const MONO_FONT = Platform.select({
-  ios: "Menlo",
-  android: "monospace",
-  default: "monospace",
-});
+import { colors, font, MONO_FONT, radius, space } from "../theme";
 
 function summarizeToolArgs(tool: ToolCallItem): string {
   const args = tool.args || {};
@@ -37,18 +31,21 @@ export function ToolCallCard({ tool }: { tool: ToolCallItem }) {
 
   const badgeColor =
     tool.status === "running"
-      ? "#f59e0b"
+      ? colors.warning
       : tool.status === "error" || tool.isError
-        ? "#ef4444"
+        ? colors.danger
         : tool.status === "done"
-          ? "#10b981"
-          : "#6b7280";
+          ? colors.success
+          : colors.textFaint;
 
   return (
     <View style={styles.card}>
       <Pressable
         style={styles.header}
         onPress={() => setExpanded((prev) => !prev)}
+        accessibilityRole="button"
+        accessibilityLabel={`${tool.toolName} ${tool.status}`}
+        accessibilityState={{ expanded }}
       >
         <View style={[styles.dot, { backgroundColor: badgeColor }]} />
         <Text style={styles.toolName}>{tool.toolName}</Text>
@@ -56,7 +53,7 @@ export function ToolCallCard({ tool }: { tool: ToolCallItem }) {
           {summary}
         </Text>
         <Text style={[styles.statusText, { color: badgeColor }]}>
-          {tool.status.toUpperCase()} {expanded ? "▾" : "▸"}
+          {expanded ? "▾" : "▸"}
         </Text>
       </Pressable>
 
@@ -64,7 +61,7 @@ export function ToolCallCard({ tool }: { tool: ToolCallItem }) {
         <View style={styles.body}>
           {summary ? (
             <View style={styles.section}>
-              <Text style={styles.sectionLabel}>INPUT</Text>
+              <Text style={styles.sectionLabel}>Input</Text>
               <Text style={styles.codeText} selectable>
                 {tool.toolName === "bash"
                   ? `$ ${summary}`
@@ -75,7 +72,7 @@ export function ToolCallCard({ tool }: { tool: ToolCallItem }) {
 
           {tool.output ? (
             <View style={styles.section}>
-              <Text style={styles.sectionLabel}>OUTPUT</Text>
+              <Text style={styles.sectionLabel}>Output</Text>
               <Text
                 style={[
                   styles.codeText,
@@ -89,7 +86,7 @@ export function ToolCallCard({ tool }: { tool: ToolCallItem }) {
               </Text>
             </View>
           ) : tool.status === "running" ? (
-            <Text style={styles.runningHint}>Running on remote host...</Text>
+            <Text style={styles.runningHint}>Running…</Text>
           ) : null}
 
           {tool.diagnostics && tool.diagnostics.length > 0 ? (
@@ -109,19 +106,16 @@ export function ToolCallCard({ tool }: { tool: ToolCallItem }) {
 
 const styles = StyleSheet.create({
   card: {
-    backgroundColor: "#141821",
-    borderColor: "#262d3d",
-    borderWidth: 1,
-    borderRadius: 8,
-    marginTop: 8,
+    backgroundColor: colors.surface,
+    borderRadius: radius.md,
     overflow: "hidden",
   },
   header: {
     flexDirection: "row",
     alignItems: "center",
-    paddingHorizontal: 10,
-    paddingVertical: 8,
-    gap: 8,
+    minHeight: 42,
+    paddingHorizontal: space.md,
+    gap: space.sm,
   },
   dot: {
     width: 8,
@@ -129,56 +123,53 @@ const styles = StyleSheet.create({
     borderRadius: 4,
   },
   toolName: {
-    color: "#93c5fd",
+    color: colors.text,
     fontFamily: MONO_FONT,
-    fontSize: 12,
-    fontWeight: "700",
+    fontSize: font.small,
+    fontWeight: "600",
   },
   summary: {
     flex: 1,
-    color: "#9ca3af",
+    color: colors.textMuted,
     fontFamily: MONO_FONT,
-    fontSize: 12,
+    fontSize: font.caption,
   },
   statusText: {
-    fontFamily: MONO_FONT,
-    fontSize: 10,
-    fontWeight: "700",
+    fontSize: font.small,
+    paddingLeft: space.xs,
   },
   body: {
-    borderTopColor: "#1f2430",
-    borderTopWidth: 1,
-    padding: 10,
-    backgroundColor: "#0d1017",
-    gap: 8,
+    borderTopColor: colors.border,
+    borderTopWidth: StyleSheet.hairlineWidth,
+    padding: space.md,
+    backgroundColor: colors.surfaceSunken,
+    gap: space.md,
   },
   section: {
-    gap: 4,
+    gap: space.xs,
   },
   sectionLabel: {
-    color: "#6b7280",
-    fontSize: 10,
-    fontWeight: "700",
-    letterSpacing: 0.6,
+    color: colors.textFaint,
+    fontSize: font.caption,
+    fontWeight: "600",
   },
   codeText: {
-    color: "#d1d5db",
+    color: colors.text,
     fontFamily: MONO_FONT,
-    fontSize: 11,
-    lineHeight: 16,
+    fontSize: font.caption,
+    lineHeight: 18,
   },
   errorText: {
-    color: "#fca5a5",
+    color: colors.dangerText,
   },
   runningHint: {
-    color: "#fbbf24",
-    fontFamily: MONO_FONT,
-    fontSize: 11,
-    fontStyle: "italic",
+    color: colors.warning,
+    fontSize: font.small,
   },
   diagText: {
-    color: "#fcd34d",
+    color: colors.warning,
     fontFamily: MONO_FONT,
-    fontSize: 11,
+    fontSize: font.caption,
+    lineHeight: 18,
   },
 });
