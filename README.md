@@ -41,6 +41,16 @@ Scan the daemon's QR code or enter its URL and token, then choose a project dire
 
 Use a trusted LAN, Tailscale, or HTTPS; the bearer token grants access to the daemon. USB localhost forwarding is for wired debugging only.
 
+### Always-on Mac (optional)
+
+To keep the daemon running on another Mac, clone the repo there (for example to `~/services/mypi`), run `npm ci`, and log in to Pi on that machine. Then install the LaunchAgent from inside its logged-in GUI session:
+
+```bash
+zsh scripts/mini/install-launchagent.sh   # starts now and at login; logs in ~/Library/Logs/mypi/daemon.log
+```
+
+From your laptop, `npm run deploy:mini` pulls the latest default branch on that host over SSH, reinstalls dependencies only when `package-lock.json` changed, and restarts the daemon. Running sessions resume after the restart. Set `MYPI_MINI_HOST` (default `mypi-mini`, an `~/.ssh/config` alias) and `MYPI_MINI_DIR` (default `services/mypi`) to match your setup.
+
 ## Development
 
 Run these commands from the repository root:
@@ -54,6 +64,8 @@ npm run mobile:web      # Browser preview
 npm run check
 npm test
 ```
+
+`npm run server:dev` runs a watch-mode daemon on port 4781 with data in `~/.mypi-dev`, so experiments stay separate from a daemon on the default port 4780.
 
 Launch scripts skip Expo metadata network requests. Native changes require rebuilding the App. After generating the Android project, run native tests with:
 

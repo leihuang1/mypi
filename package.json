@@ -8,8 +8,9 @@
     "apps/*"
   ],
   "scripts": {
-    "server:dev": "npm --workspace=@mypi/server run dev",
+    "server:dev": "MYPI_DATA_DIR=${MYPI_DATA_DIR:-$HOME/.mypi-dev} MYPI_PORT=${MYPI_PORT:-4781} npm --workspace=@mypi/server run dev",
     "server:start": "npm --workspace=@mypi/server run start",
+    "deploy:mini": "sh scripts/deploy-mini.sh",
     "mobile:start": "npm --workspace=@mypi/mobile run start",
     "mobile:android": "npm --workspace=@mypi/mobile run android",
     "mobile:ios": "npm --workspace=@mypi/mobile run ios",
