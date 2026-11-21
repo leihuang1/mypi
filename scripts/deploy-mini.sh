@@ -24,7 +24,7 @@ fi
 
 launchctl kickstart -k "gui/$(id -u)/dev.mypi.daemon"
 for _ in {1..30}; do
-  if curl -fsS -o /dev/null --max-time 1 "http://127.0.0.1:${MYPI_PORT:-4780}/healthz"; then
+  if curl -fs -o /dev/null --max-time 1 "http://127.0.0.1:${MYPI_PORT:-4780}/healthz"; then
     echo "deploy: daemon healthy"
     exit 0
   fi
