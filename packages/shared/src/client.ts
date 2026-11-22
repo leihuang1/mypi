@@ -76,9 +76,11 @@ export function parsePairingInput(input: string): ConnectPairingPayload | null {
 /** Returns "" when there is no host, so callers' required-field checks catch it. */
 export function normalizeBaseUrl(url: string): string {
   const trimmed = url.trim();
-  const scheme = /^https?:\/\//i.exec(trimmed)?.[0] ?? "http://";
-  const rest = trimmed.replace(/^https?:\/\//i, "").replace(/\/+$/, "");
-  return rest ? `${scheme}${rest}` : "";
+  const scheme = /^https?:\/\//i.exec(trimmed)?.[0];
+  // Reject scheme typos such as "http:/" so they can't become a host named "http".
+  if (!scheme && /^https?:/i.test(trimmed)) return "";
+  const rest = trimmed.slice(scheme?.length ?? 0).replace(/\/+$/, "").trim();
+  return rest ? `${scheme ?? "http://"}${rest}` : "";
 }
 
 export class SseParser {

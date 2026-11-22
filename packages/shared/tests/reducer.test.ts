@@ -154,9 +154,10 @@ describe("@mypi/shared reducer and SSE parser", () => {
   });
 
   it("normalizes base URLs and returns empty when there is no host", () => {
-    for (const blank of ["", "   ", "http://", "https:///", "/"]) {
+    for (const blank of ["", "   ", "http://", "https:///", "/", "http:/", "https:", "http:// /"]) {
       assert.equal(normalizeBaseUrl(blank), "", `input ${JSON.stringify(blank)}`);
     }
+    assert.equal(normalizeBaseUrl("httpbin.local:4780"), "http://httpbin.local:4780");
     assert.equal(normalizeBaseUrl(" 192.168.1.10:4780/ "), "http://192.168.1.10:4780");
     assert.equal(normalizeBaseUrl("HTTPS://host.ts.net//"), "HTTPS://host.ts.net");
     const once = normalizeBaseUrl("100.64.0.1:4780");

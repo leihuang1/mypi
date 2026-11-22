@@ -15,16 +15,19 @@ git pull --ff-only --quiet
 after=$(git rev-parse HEAD)
 echo "deploy: ${before:0:7} -> ${after:0:7}"
 
-source scripts/mini/env.sh
+# Same environment as the LaunchAgent, which doesn't run with nounset.
+set +u; source scripts/mini/env.sh; set -u
 
 # Reinstall only when package-lock.json differs from the last successful install,
 # so running sessions keep their modules. npm ci wipes node_modules first, so a
 # failed install also drops the marker and the next deploy retries it.
-lock=$(shasum -a 256 package-lock.json | cut -d' ' -f1)
+lock=$(shasum -a 256 package-lock.json)
+lock=${lock%% *}
 marker=node_modules/.mypi-installed-lock
 installed=$(cat "$marker" 2>/dev/null || true)
 if [[ "$installed" != "$lock" ]]; then
-  npm ci --workspace=@mypi/server --workspace=@mypi/shared --include-workspace-root --no-audit --no-fund
+  # tsx is a devDependency but the daemon runs on it; keep it even if NODE_ENV=production.
+  npm ci --include=dev --workspace=@mypi/server --workspace=@mypi/shared --include-workspace-root --no-audit --no-fund
   echo "$lock" >"$marker"
 fi
 

@@ -57,6 +57,7 @@ export function PairServerScreen({
 
     for (const candidate of urlsToTry) {
       const cleanUrl = normalizeBaseUrl(candidate);
+      if (!cleanUrl) continue;
       try {
         const client = new MyPiClient({ baseUrl: cleanUrl, token: cleanToken });
         const device = await client.getDevice();
