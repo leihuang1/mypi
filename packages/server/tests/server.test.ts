@@ -30,6 +30,7 @@ describe("@mypi/server integration test", () => {
       host: "127.0.0.1",
       dataDir: tmpDataDir,
       startDirs: [fixtureWorkspace],
+      name: "test-daemon",
       silent: true,
     });
 
@@ -46,6 +47,7 @@ describe("@mypi/server integration test", () => {
       // 2. Device info & models
       const device = await client.getDevice();
       assert.equal(device.apiVersion, 1);
+      assert.equal(device.name, "test-daemon");
       assert.ok(device.models.length > 0, "Expected models loaded");
 
       // 3. Directory listing (fixture workspace, no hardcoded checkout path)

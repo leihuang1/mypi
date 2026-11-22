@@ -39,6 +39,8 @@ Connect a phone with USB debugging enabled or use an emulator. The APK is genera
 
 Scan the daemon's QR code or enter its URL and token, then choose a project directory and create a session. Keep the development machine and daemon running.
 
+The app saves the server under the daemon's name: `MYPI_NAME`, or the hostname if unset. To rename a saved server, change `MYPI_NAME`, restart the daemon and scan its QR code again.
+
 Use a trusted LAN, Tailscale, or HTTPS; the bearer token grants access to the daemon. USB localhost forwarding is for wired debugging only.
 
 ### Always-on Mac (optional)
@@ -48,6 +50,8 @@ To keep the daemon running on another Mac, clone the repo there (for example to 
 ```bash
 zsh scripts/mini/install-launchagent.sh   # starts now and at login; logs in ~/Library/Logs/mypi/daemon.log
 ```
+
+Host-specific settings go in `~/.mypi/daemon.env` on that machine (for example `MYPI_NAME=mini`), which the LaunchAgent loads at each start.
 
 From your laptop, `npm run deploy:mini` pulls the latest default branch on that host over SSH, reinstalls dependencies only when `package-lock.json` changed, and restarts the daemon. Running sessions resume after the restart. Set `MYPI_MINI_HOST` (default `mac-mini`, an `~/.ssh/config` alias) and `MYPI_MINI_DIR` (default `services/mypi`) to match your setup.
 

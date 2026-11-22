@@ -83,6 +83,7 @@ const DEFAULT_SYSTEM_INSTRUCTIONS = [
 
 export class HarnessManager {
   readonly dataDir: string;
+  readonly name: string;
   readonly startDirs: string[];
   readonly modelsConfig: LoadedModelsConfig;
   readonly startedAt = Date.now();
@@ -99,7 +100,9 @@ export class HarnessManager {
     dataDir: string;
     startDirs: string[];
     modelsConfig: LoadedModelsConfig;
+    name?: string;
   }) {
+    this.name = options.name ?? os.hostname();
     this.dataDir = options.dataDir;
     this.startDirs = options.startDirs;
     this.modelsConfig = options.modelsConfig;
@@ -283,7 +286,7 @@ export class HarnessManager {
   getDeviceInfo(): DeviceInfo {
     return {
       uid: this.catalog.deviceUid,
-      name: os.hostname(),
+      name: this.name,
       hostname: os.hostname(),
       platform: `${os.platform()} (${os.arch()})`,
       apiVersion: 1,

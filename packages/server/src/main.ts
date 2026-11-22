@@ -93,6 +93,7 @@ export async function startMyPiServer(options?: {
   host?: string;
   dataDir?: string;
   startDirs?: string[];
+  name?: string;
   silent?: boolean;
 }) {
   const dataDir =
@@ -101,6 +102,7 @@ export async function startMyPiServer(options?: {
     path.join(os.homedir(), ".mypi");
   const port = options?.port ?? Number.parseInt(process.env.MYPI_PORT || "4780", 10);
   const host = options?.host ?? process.env.MYPI_HOST ?? "0.0.0.0";
+  const name = options?.name ?? (process.env.MYPI_NAME?.trim() || os.hostname());
 
   const defaultCodeDir = path.join(os.homedir(), "code");
   const startDirs =
@@ -115,6 +117,7 @@ export async function startMyPiServer(options?: {
     dataDir,
     startDirs,
     modelsConfig,
+    name,
   });
 
   await manager.resumeSessions();
@@ -166,11 +169,12 @@ export async function startMyPiServer(options?: {
       .slice(1)
       .map((ip) => `&fallbackUrl=${encodeURIComponent(`http://${ip}:${actualPort}`)}`)
       .join("");
-    const pairingUri = `mypi://connect?url=${encodeURIComponent(primaryUrl)}${fallbackParams}&token=${encodeURIComponent(token)}&name=${encodeURIComponent(os.hostname())}`;
+    const pairingUri = `mypi://connect?url=${encodeURIComponent(primaryUrl)}${fallbackParams}&token=${encodeURIComponent(token)}&name=${encodeURIComponent(name)}`;
 
     console.log("\n========================================================");
     console.log("  MyPi Durable Daemon is running!");
     console.log("========================================================");
+    console.log(`  Name         : ${name}`);
     console.log(`  Hostname     : ${os.hostname()}`);
     console.log(`  Data Dir     : ${dataDir}`);
     console.log(
