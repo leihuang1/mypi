@@ -49,7 +49,7 @@ To keep the daemon running on another Mac, clone the repo there (for example to 
 zsh scripts/mini/install-launchagent.sh   # starts now and at login; logs in ~/Library/Logs/mypi/daemon.log
 ```
 
-From your laptop, `npm run deploy:mini` pulls the latest default branch on that host over SSH, reinstalls dependencies only when `package-lock.json` changed, and restarts the daemon. Running sessions resume after the restart. Set `MYPI_MINI_HOST` (default `mypi-mini`, an `~/.ssh/config` alias) and `MYPI_MINI_DIR` (default `services/mypi`) to match your setup.
+From your laptop, `npm run deploy:mini` pulls the latest default branch on that host over SSH, reinstalls dependencies only when `package-lock.json` changed, and restarts the daemon. Running sessions resume after the restart. Set `MYPI_MINI_HOST` (default `mac-mini`, an `~/.ssh/config` alias) and `MYPI_MINI_DIR` (default `services/mypi`) to match your setup.
 
 ## Development
 

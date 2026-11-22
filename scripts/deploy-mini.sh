@@ -1,9 +1,9 @@
 #!/bin/sh
 # Deploy origin's default branch to the always-on host's daemon over SSH.
-#   MYPI_MINI_HOST  ssh destination (default: mypi-mini, an ~/.ssh/config alias)
+#   MYPI_MINI_HOST  ssh destination (default: mac-mini, an ~/.ssh/config alias)
 #   MYPI_MINI_DIR   daemon checkout on that host (default: ~/services/mypi)
 set -eu
-host="${MYPI_MINI_HOST:-mypi-mini}"
+host="${MYPI_MINI_HOST:-mac-mini}"
 dir="${MYPI_MINI_DIR:-services/mypi}"
 
 ssh "$host" /bin/zsh -s -- "$dir" <<'REMOTE'
