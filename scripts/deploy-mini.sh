@@ -8,6 +8,7 @@ dir="${MYPI_MINI_DIR:-services/mypi}"
 
 ssh "$host" /bin/zsh -s -- "$dir" <<'REMOTE'
 set -eu
+export PATH="$HOME/.local/bin:/opt/homebrew/bin:/usr/local/bin:$PATH"
 cd "$1"
 before=$(git rev-parse HEAD)
 git pull --ff-only --quiet
@@ -16,9 +17,11 @@ echo "deploy: ${before:0:7} -> ${after:0:7}"
 
 # Reinstall only when dependencies changed, so running sessions keep their modules.
 if [[ ! -d node_modules ]] || ! git diff --quiet "$before" "$after" -- package-lock.json; then
-  export NVM_DIR="$HOME/.nvm"
-  source "$NVM_DIR/nvm.sh" --no-use
-  nvm use --silent default
+  export NVM_DIR="${NVM_DIR:-$HOME/.nvm}"
+  if [[ -s "$NVM_DIR/nvm.sh" ]]; then
+    source "$NVM_DIR/nvm.sh" --no-use
+    nvm use --silent default
+  fi
   npm ci --workspace=@mypi/server --workspace=@mypi/shared --include-workspace-root --no-audit --no-fund
 fi
 

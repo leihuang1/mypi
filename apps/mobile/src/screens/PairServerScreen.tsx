@@ -36,8 +36,8 @@ export function PairServerScreen({
   onCancel?: () => void;
 }) {
   const [pairingInput, setPairingInput] = useState("");
-  const [name, setName] = useState("MacBook");
-  const [url, setUrl] = useState("http://192.168.75.84:4780");
+  const [name, setName] = useState("");
+  const [url, setUrl] = useState("");
   const [token, setToken] = useState("");
   const [testing, setTesting] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -211,8 +211,6 @@ export function PairServerScreen({
         <View style={styles.presetRow}>
           {[
             { label: "USB", val: "http://127.0.0.1:4780" },
-            { label: "Wi-Fi", val: "http://192.168.75.84:4780" },
-            { label: "Tailscale", val: "http://100.125.236.126:4780" },
           ].map((preset) => (
             <Pressable
               key={preset.val}

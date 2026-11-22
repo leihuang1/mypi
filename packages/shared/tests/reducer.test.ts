@@ -46,8 +46,8 @@ describe("@mypi/shared reducer and SSE parser", () => {
       session: {
         id: "sess-1",
         name: "Test Session",
-        cwd: "/Users/kaleo/code/android/mypi",
-        model: { provider: "openai", modelId: "gpt-6-astra" },
+        cwd: "/tmp/workspace/mypi",
+        model: { provider: "openai", modelId: "test-model" },
         thinkingLevel: "high",
         createdAt: 1000,
         updatedAt: 1000,
@@ -68,9 +68,9 @@ describe("@mypi/shared reducer and SSE parser", () => {
         compactions: [],
         inbox: [],
         agent: {
-          model: { provider: "openai", modelId: "gpt-6-astra" },
+          model: { provider: "openai", modelId: "test-model" },
           thinkingLevel: "high",
-          cwd: "/Users/kaleo/code/android/mypi",
+          cwd: "/tmp/workspace/mypi",
         },
       },
     });
