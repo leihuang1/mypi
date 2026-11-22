@@ -49,7 +49,7 @@ export function PairServerScreen({
   const connectWithCandidates = async (
     urlsToTry: string[],
     cleanToken: string,
-    preferredName?: string,
+    preferredName: string,
   ) => {
     setTesting(true);
     setError(null);
@@ -63,7 +63,7 @@ export function PairServerScreen({
         setUrl(cleanUrl);
         setToken(cleanToken);
         await onSaveProfile({
-          name: preferredName?.trim() || name.trim() || device.name || cleanUrl,
+          name: preferredName.trim() || device.name || cleanUrl,
           url: cleanUrl,
           token: cleanToken,
         });
@@ -88,7 +88,7 @@ export function PairServerScreen({
     if (parsed) {
       setUrl(parsed.url);
       setToken(parsed.token);
-      if (parsed.name) setName(parsed.name);
+      setName(parsed.name ?? "");
       setError(null);
       if (autoConnect) {
         const candidates = [
@@ -96,7 +96,7 @@ export function PairServerScreen({
           ...(parsed.fallbackUrls ?? []),
           "http://127.0.0.1:4780",
         ].filter((v, idx, arr) => Boolean(v) && arr.indexOf(v) === idx);
-        void connectWithCandidates(candidates, parsed.token, parsed.name);
+        void connectWithCandidates(candidates, parsed.token, parsed.name ?? "");
       }
     } else if (autoConnect) {
       setError("Invalid QR code format. Expected mypi://connect?... URI.");

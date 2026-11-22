@@ -51,7 +51,7 @@ To keep the daemon running on another Mac, clone the repo there (for example to 
 zsh scripts/mini/install-launchagent.sh   # starts now and at login; logs in ~/Library/Logs/mypi/daemon.log
 ```
 
-Host-specific settings go in `~/.mypi/daemon.env` on that machine (for example `MYPI_NAME=mini`), which the LaunchAgent loads at each start.
+Host-specific settings go in `~/.mypi/daemon.env` on that machine (for example `MYPI_NAME=mini`, or a `PATH` that finds your Node), which the LaunchAgent and `deploy:mini` load each time. nvm's default Node is used when nvm is installed, otherwise `node` from `PATH`.
 
 From your laptop, `npm run deploy:mini` pulls the latest default branch on that host over SSH, reinstalls dependencies only when `package-lock.json` changed, and restarts the daemon. Running sessions resume after the restart. Set `MYPI_MINI_HOST` (default `mac-mini`, an `~/.ssh/config` alias) and `MYPI_MINI_DIR` (default `services/mypi`) to match your setup.
 

@@ -4,6 +4,7 @@ import {
   applyAgentEvent,
   applySnapshot,
   createInitialSessionState,
+  normalizeBaseUrl,
   parsePairingInput,
   reduceSseFrame,
   SseParser,
@@ -150,6 +151,16 @@ describe("@mypi/shared reducer and SSE parser", () => {
       token: "secret123",
       name: "MacBook",
     });
+  });
+
+  it("normalizes base URLs and returns empty when there is no host", () => {
+    for (const blank of ["", "   ", "http://", "https:///", "/"]) {
+      assert.equal(normalizeBaseUrl(blank), "", `input ${JSON.stringify(blank)}`);
+    }
+    assert.equal(normalizeBaseUrl(" 192.168.1.10:4780/ "), "http://192.168.1.10:4780");
+    assert.equal(normalizeBaseUrl("HTTPS://host.ts.net//"), "HTTPS://host.ts.net");
+    const once = normalizeBaseUrl("100.64.0.1:4780");
+    assert.equal(normalizeBaseUrl(once), once);
   });
 
   it("calculates active contextTokens after compaction/reset and parses nested UsageState", () => {

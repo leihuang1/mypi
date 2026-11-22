@@ -15,14 +15,17 @@ git pull --ff-only --quiet
 after=$(git rev-parse HEAD)
 echo "deploy: ${before:0:7} -> ${after:0:7}"
 
-# Reinstall only when dependencies changed, so running sessions keep their modules.
-if [[ ! -d node_modules ]] || ! git diff --quiet "$before" "$after" -- package-lock.json; then
-  export NVM_DIR="${NVM_DIR:-$HOME/.nvm}"
-  if [[ -s "$NVM_DIR/nvm.sh" ]]; then
-    source "$NVM_DIR/nvm.sh" --no-use
-    nvm use --silent default
-  fi
+source scripts/mini/env.sh
+
+# Reinstall only when package-lock.json differs from the last successful install,
+# so running sessions keep their modules. npm ci wipes node_modules first, so a
+# failed install also drops the marker and the next deploy retries it.
+lock=$(shasum -a 256 package-lock.json | cut -d' ' -f1)
+marker=node_modules/.mypi-installed-lock
+installed=$(cat "$marker" 2>/dev/null || true)
+if [[ "$installed" != "$lock" ]]; then
   npm ci --workspace=@mypi/server --workspace=@mypi/shared --include-workspace-root --no-audit --no-fund
+  echo "$lock" >"$marker"
 fi
 
 launchctl kickstart -k "gui/$(id -u)/dev.mypi.daemon"
