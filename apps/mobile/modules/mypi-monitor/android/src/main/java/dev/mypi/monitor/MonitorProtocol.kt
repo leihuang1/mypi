@@ -2,6 +2,14 @@ package dev.mypi.monitor
 
 import java.io.Reader
 
+internal const val RUN_CHANNEL = "mypi-runs"
+internal const val QUESTION_CHANNEL = "mypi-questions"
+
+/** The agent's questions interrupt (heads-up); finished and failed runs don't. Daemons before M2 send no kind. */
+internal fun noticeChannel(kind: String?): String = if (kind == "question") QUESTION_CHANNEL else RUN_CHANNEL
+
+internal fun validNoticeKind(kind: String): Boolean = kind in listOf("", "done", "question", "error")
+
 internal data class NoticeCursor(val epoch: String, val sequence: Long) {
   companion object {
     fun parse(value: String): NoticeCursor? {

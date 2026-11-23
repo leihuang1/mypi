@@ -5,6 +5,16 @@ import org.junit.Test
 import java.io.StringReader
 
 class MonitorProtocolTest {
+  @Test fun questionsGetTheirOwnInterruptingChannel() {
+    assertEquals(QUESTION_CHANNEL, noticeChannel("question"))
+    assertEquals(RUN_CHANNEL, noticeChannel("done"))
+    assertEquals(RUN_CHANNEL, noticeChannel("error"))
+    assertEquals(RUN_CHANNEL, noticeChannel(""))
+    assertEquals(RUN_CHANNEL, noticeChannel(null))
+    assertTrue(validNoticeKind("") && validNoticeKind("question"))
+    assertFalse(validNoticeKind("other"))
+  }
+
   @Test fun onlyCompleteSseEventsAreDelivered() {
     val events = mutableListOf<String>()
     readSse(StringReader(": heartbeat\r\ndata: {\"type\":\"ready\"}\r\n\r\ndata: first\ndata: second\n\ndata: unfinished"), events::add)

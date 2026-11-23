@@ -22,7 +22,6 @@ class MonitorService : Service() {
 
   companion object {
     private const val STATUS_CHANNEL = "mypi-monitor"
-    private const val RUN_CHANNEL = "mypi-runs"
     private const val STATUS_ID = 1
     private const val STOP = "dev.mypi.monitor.STOP"
     internal var instance: MonitorService? = null
@@ -43,6 +42,10 @@ class MonitorService : Service() {
         })
         manager.createNotificationChannel(NotificationChannel(RUN_CHANNEL, "运行动态", NotificationManager.IMPORTANCE_DEFAULT).apply {
           description = "运行结束与无法继续的执行异常"
+          lockscreenVisibility = Notification.VISIBILITY_PRIVATE
+        })
+        manager.createNotificationChannel(NotificationChannel(QUESTION_CHANNEL, "需要你回答", NotificationManager.IMPORTANCE_HIGH).apply {
+          description = "Agent 提了问题，等你回答才能继续"
           lockscreenVisibility = Notification.VISIBILITY_PRIVATE
         })
       }
@@ -129,6 +132,7 @@ class MonitorService : Service() {
           require(frame.getString("sessionId").matches(Regex("[a-zA-Z0-9_-]{1,100}")))
           require(frame.getString("title").length <= 200 && frame.getString("body").length <= 1000)
           require(frame.getLong("createdAt") > 0)
+          require(validNoticeKind(frame.optString("kind")))
         }
         handler.post {
           if (connections[id] === connection) receive(server, frame)
@@ -169,7 +173,7 @@ class MonitorService : Service() {
         val session = frame.getString("sessionId")
         val createdAt = frame.getLong("createdAt")
         if (shouldNotify(visible, viewedServer, viewedSession, server.id, session, createdAt, System.currentTimeMillis())) {
-          showNotice(server.id, session, cursor, frame.getString("title"), frame.getString("body"), createdAt)
+          showNotice(server.id, session, cursor, frame.getString("title"), frame.getString("body"), frame.optString("kind"), createdAt)
         }
       }
     } catch (_: Exception) {
@@ -214,13 +218,14 @@ class MonitorService : Service() {
     onStateChanged?.invoke()
   }
 
-  private fun showNotice(serverId: String, sessionId: String, cursor: String, title: String, body: String, createdAt: Long) {
+  private fun showNotice(serverId: String, sessionId: String, cursor: String, title: String, body: String, kind: String, createdAt: Long) {
+    val channel = noticeChannel(kind)
     val uri = Uri.Builder().scheme("mypi").authority("session")
       .appendQueryParameter("serverId", serverId).appendQueryParameter("sessionId", sessionId)
       .appendQueryParameter("eventId", cursor).build()
-    val publicVersion = builder(RUN_CHANNEL).setSmallIcon(R.drawable.mypi_notification)
-      .setContentTitle("MyPi").setContentText("有新的运行动态").build()
-    val notification = builder(RUN_CHANNEL)
+    val publicVersion = builder(channel).setSmallIcon(R.drawable.mypi_notification)
+      .setContentTitle("MyPi").setContentText(if (channel == QUESTION_CHANNEL) "Agent 在等你回答" else "有新的运行动态").build()
+    val notification = builder(channel)
       .setSmallIcon(R.drawable.mypi_notification)
       .setContentTitle(title)
       .setContentText(body)
@@ -234,6 +239,8 @@ class MonitorService : Service() {
       .setVisibility(Notification.VISIBILITY_PRIVATE)
       .setPublicVersion(publicVersion)
       .setDefaults(Notification.DEFAULT_ALL)
+      // Before channels (API < 26), priority decides whether it pops up.
+      .setPriority(if (channel == QUESTION_CHANNEL) Notification.PRIORITY_HIGH else Notification.PRIORITY_DEFAULT)
       .build()
     getSystemService(NotificationManager::class.java).notify("$serverId:$cursor", 2, notification)
   }

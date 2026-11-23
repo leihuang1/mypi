@@ -11,6 +11,8 @@ Run [Pi](https://pi.dev) coding sessions on your development machine and follow 
 - Workspace change lists with full-screen, single-column Git diffs.
 - Android background monitoring with local notifications. No third-party push account or credentials required.
 - The agent gets what the Pi CLI gives it: `AGENTS.md` / `CLAUDE.md` from `~/.pi/agent` and the repo, skills from `~/.agents/skills` and the repo's `.agents/skills` / `.pi/skills`, and ponytail (on by default, toggled per session).
+- Each session in a git repo works on its own branch, `mypi/<id>`, in its own worktree under `~/.mypi/worktrees`, started from a fresh `origin/<default>`; your checkout is never touched. The agent can ask you a question (a ❓ notification with answer chips), and a finished run sends ✅ with its summary and `+N −M`.
+- **Ship** commits what's left, pushes the session's branch and opens a draft PR with the daemon's `gh` login. It only ever pushes `mypi/` branches and never force-pushes. When the PR is merged or closed, the daemon removes the worktree and archives the session; Archive does the same by hand, asking first if work would be lost.
 - The agent shouldn't push by accident. Its shell runs with GitHub tokens, gh's login and git's credential helpers removed, and a guard blocks `git push`, `gh auth`, `gh pr merge` and keychain reads. This is not a sandbox: SSH keys and your files stay reachable, so protect default branches with GitHub rulesets.
 
 ## Getting Started

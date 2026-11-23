@@ -1,9 +1,11 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   ActivityIndicator,
+  Alert,
   AppState,
   Keyboard,
   KeyboardAvoidingView,
+  Linking,
   Platform,
   Pressable,
   ScrollView,
@@ -23,6 +25,7 @@ import {
   type SendMessageRequest,
   type SessionLiveState,
   type SessionSummary,
+  type ShipPreview,
   type ThinkingLevel,
   type TranscriptItem,
 } from "@mypi/shared";
@@ -231,7 +234,7 @@ export function SessionDetailScreen({
   // - "rename": tapped top session title -> rename session or jump to CWD
   // - "compact" | "reset" | "usage": tapped telemetry bar / compact / reset icons
   const [topSheet, setTopSheet] = useState<
-    "rename" | "usage" | "compact" | "reset" | null
+    "rename" | "usage" | "compact" | "reset" | "ship" | null
   >(null);
 
   // Bottom Composer Quick Tray:
@@ -246,6 +249,8 @@ export function SessionDetailScreen({
   const [compactInstructions, setCompactInstructions] = useState("");
   const [resetPrompt, setResetPrompt] = useState("");
   const [controlBusy, setControlBusy] = useState(false);
+  const [shipPreview, setShipPreview] = useState<ShipPreview | null>(null);
+  const [shipMessage, setShipMessage] = useState("");
 
   // Quick @-mention inline directory browser state
   const [quickBrowsePath, setQuickBrowsePath] = useState<string>(session.cwd);
@@ -265,11 +270,24 @@ export function SessionDetailScreen({
     workspace.refresh();
   };
 
+  // Status, the agent's question and the PR are on the summary, which changes when a run ends.
+  const refreshSummary = () => {
+    const targetSessionId = session.id;
+    client.getSession(targetSessionId).then((updated) => {
+      if (mountedRef.current && currentSessionIdRef.current === targetSessionId) onSessionUpdated?.(updated);
+    }).catch(() => {});
+  };
+
   // Subscribe to SSE durable stream and auto-reconnect on foreground wakeup
   useEffect(() => {
     const unsubscribe = client.subscribeSessionEvents(session.id, {
       onFrame: (frame) => {
-        if (frame.type === "snapshot") setSnapshotReady(true);
+        if (frame.type === "snapshot") {
+          setSnapshotReady(true);
+          onSessionUpdated?.(frame.session);
+        }
+        // The run's task settles just after run_end.
+        if (frame.type === "events" && frame.events.some((event) => event.type === "run_end")) setTimeout(refreshSummary, 800);
         if (frame.type === "snapshot" || (frame.type === "events" && frame.events.some(
           (event) => event.type === "tool_execution_end" || event.type === "run_end",
         ))) workspace.refresh();
@@ -559,6 +577,92 @@ export function SessionDetailScreen({
     }
   };
 
+  const openShip = async () => {
+    if (topSheet === "ship") {
+      setTopSheet(null);
+      return;
+    }
+    const targetSessionId = session.id;
+    setTopSheet("ship");
+    setShipPreview(null);
+    try {
+      const preview = await client.getShipPreview(targetSessionId);
+      if (mountedRef.current && currentSessionIdRef.current === targetSessionId) {
+        setShipPreview(preview);
+        setShipMessage(preview.suggestedMessage);
+      }
+    } catch (err) {
+      if (mountedRef.current && currentSessionIdRef.current === targetSessionId) {
+        setConnError(err instanceof Error ? err.message : String(err));
+      }
+    }
+  };
+
+  const handleShip = async () => {
+    if (controlBusy || !shipPreview?.ready) return;
+    const targetSessionId = session.id;
+    setControlBusy(true);
+    try {
+      const result = await client.shipSession(targetSessionId, { message: shipMessage.trim() || undefined });
+      onSessionUpdated?.(result.session);
+      if (mountedRef.current && currentSessionIdRef.current === targetSessionId) {
+        setTopSheet(null);
+        Alert.alert(`已发布到 PR #${result.pr.number}`, result.pr.url, [
+          { text: "关闭", style: "cancel" },
+          { text: "打开 PR", onPress: () => { void Linking.openURL(result.pr.url); } },
+        ]);
+      }
+    } catch (err) {
+      if (mountedRef.current && currentSessionIdRef.current === targetSessionId) {
+        setConnError(err instanceof Error ? err.message : String(err));
+      }
+    } finally {
+      if (mountedRef.current && currentSessionIdRef.current === targetSessionId) {
+        setControlBusy(false);
+      }
+    }
+  };
+
+  /** Archive; when the worktree still holds work, say what happens to it and ask first. */
+  const handleArchive = async (force = false) => {
+    if (controlBusy) return;
+    const targetSessionId = session.id;
+    setControlBusy(true);
+    try {
+      const result = await client.archiveSession(targetSessionId, { force });
+      onSessionUpdated?.(result.session);
+      if (!mountedRef.current || currentSessionIdRef.current !== targetSessionId) return;
+      if (result.archived) {
+        setTopSheet(null);
+        return;
+      }
+      const what = [
+        result.uncommitted > 0 ? `${result.uncommitted} 个未提交的改动会被丢弃` : "",
+        result.unpushed > 0 ? `${result.unpushed} 个未推送的提交会留在分支 ${session.branch} 上` : "",
+      ].filter(Boolean).join("\n");
+      Alert.alert("归档这个会话？", `${what}\n归档后会话只能查看。`, [
+        { text: "取消", style: "cancel" },
+        { text: "归档", style: "destructive", onPress: () => { void handleArchive(true); } },
+      ]);
+    } catch (err) {
+      if (mountedRef.current && currentSessionIdRef.current === targetSessionId) {
+        setConnError(err instanceof Error ? err.message : String(err));
+      }
+    } finally {
+      if (mountedRef.current && currentSessionIdRef.current === targetSessionId) {
+        setControlBusy(false);
+      }
+    }
+  };
+
+  /** Answer the agent's ask_user question with one of its choices. */
+  const handleAnswer = async (answer: string) => {
+    if (sending || failedDraft) return;
+    const requestId = `mobile-${session.id}-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
+    isNearBottomRef.current = true;
+    await submitMessage({ requestId, content: answer, whenBusy: "steer" });
+  };
+
   const handleMentionPath = (mentionToken: string) => {
     updateInputText((prev) => {
       const trimmed = prev.trimEnd();
@@ -629,7 +733,7 @@ export function SessionDetailScreen({
             <Text style={styles.editHintIcon}>✎</Text>
           </View>
           <Text style={styles.cwdText} numberOfLines={1}>
-            {shortenPath(activeCwd)}
+            {session.branch ? `${shortenPath(session.repoPath ?? activeCwd)} · ${session.branch}` : shortenPath(activeCwd)}
           </Text>
         </Pressable>
 
@@ -697,6 +801,14 @@ export function SessionDetailScreen({
         </Pressable>
 
         <View style={styles.telemetryActions}>
+          {session.branch && !session.archivedAt && (
+            <Pressable
+              style={[styles.miniIconPill, topSheet === "ship" ? styles.miniIconPillActive : null]}
+              onPress={() => { void openShip(); }}
+            >
+              <Text style={styles.miniIconPillText}>{session.prUrl ? "PR" : "Ship"}</Text>
+            </Pressable>
+          )}
           <Pressable
             style={[
               styles.miniIconPill,
@@ -761,6 +873,54 @@ export function SessionDetailScreen({
               }}
             >
               <Text style={styles.popoverSecondaryBtnText}>Change folder</Text>
+            </Pressable>
+          </View>
+        </View>
+      )}
+
+      {/* Ship the session's branch as a draft PR, or archive it */}
+      {topSheet === "ship" && (
+        <View style={styles.topPopoverCard}>
+          <View style={styles.popoverHeaderRow}>
+            <Text style={styles.popoverTitle}>{session.prUrl ? "更新 PR" : "发布为草稿 PR"}</Text>
+            <Pressable onPress={() => setTopSheet(null)}>
+              <Text style={styles.popoverCloseText}>✕</Text>
+            </Pressable>
+          </View>
+          <Text style={styles.sheetHint} numberOfLines={1}>{session.branch} → {session.baseRef}</Text>
+          {!shipPreview ? (
+            <ActivityIndicator color={colors.textMuted} />
+          ) : (
+            <>
+              <Text style={styles.sheetHint}>
+                {shipPreview.ready
+                  ? `${shipPreview.uncommitted} 个未提交的改动 · ${shipPreview.unpushed} 个未推送的提交`
+                  : shipPreview.reason}
+              </Text>
+              {shipPreview.ready && (
+                <View style={styles.renameRow}>
+                  <TextInput
+                    style={[styles.popoverInput, { flex: 1 }]}
+                    value={shipMessage}
+                    onChangeText={setShipMessage}
+                    placeholder="Commit message"
+                    placeholderTextColor={colors.textFaint}
+                  />
+                  <Pressable style={styles.popoverPrimaryBtn} onPress={handleShip} disabled={controlBusy}>
+                    <Text style={styles.popoverPrimaryBtnText}>{controlBusy ? "…" : "Ship"}</Text>
+                  </Pressable>
+                </View>
+              )}
+            </>
+          )}
+          <View style={styles.cwdSwitchRow}>
+            {session.prUrl ? (
+              <Pressable style={styles.popoverSecondaryBtn} onPress={() => { void Linking.openURL(session.prUrl!); }}>
+                <Text style={styles.popoverSecondaryBtnText}>打开 PR</Text>
+              </Pressable>
+            ) : <View />}
+            <Pressable style={styles.popoverSecondaryBtn} onPress={() => { void handleArchive(); }} disabled={controlBusy}>
+              <Text style={styles.popoverSecondaryBtnText}>归档</Text>
             </Pressable>
           </View>
         </View>
@@ -1304,6 +1464,33 @@ export function SessionDetailScreen({
               </View>
             )}
 
+            {session.archivedAt ? (
+              <View style={styles.changesEntry}>
+                <Text style={styles.changesEntryHint}>会话已归档，只能查看</Text>
+              </View>
+            ) : null}
+            {/* The agent's ask_user question: tap a choice to answer, or type one. */}
+            {!liveState.busy && session.status === "needs_you" && session.question && (
+              <View style={styles.questionCard}>
+                <Text style={styles.changesEntryText}>{session.question.text}</Text>
+                {session.question.choices?.length ? (
+                  <View style={styles.choiceRow}>
+                    {session.question.choices.map((choice) => (
+                      <Pressable
+                        key={choice}
+                        style={styles.drawerThinkingPill}
+                        onPress={() => { void handleAnswer(choice); }}
+                        disabled={sending || Boolean(failedDraft)}
+                        accessibilityRole="button"
+                      >
+                        <Text style={styles.drawerPillText}>{choice}</Text>
+                      </Pressable>
+                    ))}
+                  </View>
+                ) : null}
+              </View>
+            )}
+
             {(workspace.info?.files.length ?? 0) > 0 && (
               <Pressable style={styles.changesEntry} onPress={openChanges} accessibilityRole="button">
                 <Text style={styles.changesEntryText}>{workspace.info!.files.length} 个文件有改动</Text>
@@ -1462,6 +1649,8 @@ const styles = StyleSheet.create({
   changesEntry: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", paddingHorizontal: space.md, minHeight: touch, backgroundColor: colors.surface, borderRadius: radius.md },
   changesEntryText: { color: colors.text, fontSize: font.small, fontWeight: "500" },
   changesEntryHint: { color: colors.textMuted, fontSize: font.small },
+  questionCard: { gap: space.sm, padding: space.md, backgroundColor: colors.surface, borderRadius: radius.md },
+  choiceRow: { flexDirection: "row", flexWrap: "wrap", gap: space.sm },
   newMessages: {
     position: "absolute",
     alignSelf: "center",
