@@ -13,7 +13,6 @@ import type {
   UpdateBookmarkRequest,
   UpdateSessionRequest,
 } from "@mypi/shared";
-import { inspectGitDirectory, noGitStatus } from "./git-service.js";
 import type { HarnessManager } from "./harness-mgr.js";
 
 function setCorsHeaders(res: ServerResponse): void {
@@ -321,10 +320,7 @@ export function createRequestHandler(options: {
 
         // GET /v1/sessions/:id/git
         if (req.method === "GET" && subRoute === "git") {
-          const summary = await manager.getSessionSummary(sessionId);
-          // An archived session's worktree is gone.
-          const gitInfo = summary.archivedAt ? noGitStatus() : await inspectGitDirectory(summary.cwd, summary.baseRef);
-          sendJson(res, 200, gitInfo);
+          sendJson(res, 200, await manager.gitStatus(sessionId));
           return;
         }
 

@@ -9,13 +9,17 @@ const execFileAsync = promisify(execFile);
 export interface SessionWorktree {
   /** The folder the session was started from. Its checkout is never touched. */
   sourceCwd: string;
-  /** Root of the repository `sourceCwd` is in. */
+  /** Root of the checkout `sourceCwd` is in, which may itself be a worktree that goes away. */
   repoPath: string;
+  /** The repository's shared git directory, which outlives every checkout: git maintenance runs here. */
+  gitDir: string;
   /** Root of the worktree. */
   path: string;
   branch: string;
   /** What the branch started from, and what its changes are measured against. */
   baseRef: string;
+  /** The commit it started at: a base that can't move or vanish, for when `baseRef` does. */
+  baseCommit: string;
 }
 
 /** What a worktree holds that exists nowhere else. */
@@ -23,18 +27,41 @@ export interface WorktreeWork {
   exists: boolean;
   /** Changed, staged and untracked paths. */
   uncommitted: number;
-  /** Commits on the branch that neither a remote branch nor the base has. */
+  /** Ignored files that aren't regenerable output (an `.env`, notes, data). */
+  ignored: number;
+  /** Commits on the branch, or on whatever the worktree has checked out, that neither a remote branch nor the base has. */
   unpushed: number;
 }
 
-// Network operations must fail rather than wait for a password: the daemon has no terminal. Built per call, not at
-// import, so it is the environment the daemon has now.
-const networkEnv = () => ({ ...process.env, GIT_TERMINAL_PROMPT: "0", GCM_INTERACTIVE: "never" });
+// The daemon may inherit a repository selection (a launcher run from a git hook); every git command here names its own.
+export const REPO_SELECTORS = ["GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_OBJECT_DIRECTORY", "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+  "GIT_COMMON_DIR", "GIT_NAMESPACE", "GIT_PREFIX"];
+
+/** The daemon's environment for git, built per call so it is the current one. */
+export function gitEnv(extra: Record<string, string> = {}): NodeJS.ProcessEnv {
+  const env = { ...process.env, ...extra };
+  for (const name of REPO_SELECTORS) delete env[name];
+  return env;
+}
+
+/** Network operations must fail rather than wait for a password: the daemon has no terminal. */
+export const networkEnv = () => gitEnv({ GIT_TERMINAL_PROMPT: "0", GCM_INTERACTIVE: "never" });
+
+// Regenerable output that cleanup may delete with a worktree. Any other ignored file counts as work.
+const DISPOSABLE = new Set(["node_modules", ".venv", "venv", "__pycache__", ".pytest_cache", ".mypy_cache", ".ruff_cache",
+  "dist", "build", "out", "target", ".next", ".nuxt", ".turbo", ".cache", ".parcel-cache", "coverage", ".gradle",
+  ".DS_Store"]);
+const DISPOSABLE_FILE = /\.(log|pyc|tsbuildinfo)$/;
+
+function disposable(ignoredPath: string): boolean {
+  const parts = ignoredPath.replace(/\/$/, "").split("/");
+  return parts.some((part) => DISPOSABLE.has(part)) || DISPOSABLE_FILE.test(parts.at(-1) ?? "");
+}
 
 async function git(cwd: string, args: string[], options: { env?: NodeJS.ProcessEnv; timeout?: number } = {}): Promise<string> {
   const { stdout } = await execFileAsync("git", args, {
     cwd,
-    env: options.env ?? process.env,
+    env: options.env ?? gitEnv(),
     timeout: options.timeout ?? 15_000,
     maxBuffer: 4 * 1024 * 1024,
   });
@@ -60,15 +87,17 @@ async function baseFor(repoPath: string): Promise<string> {
     return (await git(repoPath, ["symbolic-ref", "--quiet", "--short", "HEAD"]).catch(() => "")) || git(repoPath, ["rev-parse", "HEAD"]);
   }
   try {
-    await git(repoPath, ["fetch", "--quiet", "--prune", "origin"], { env: networkEnv(), timeout: 60_000 });
+    // followRemoteHEAD: the fetch also moves origin/HEAD when the remote's default branch changed (git 2.48+).
+    await git(repoPath, ["-c", "remote.origin.followRemoteHEAD=always", "fetch", "--quiet", "--prune", "origin"],
+      { env: networkEnv(), timeout: 30_000 });
   } catch (err) {
     console.warn(`[mypi-server] git fetch failed in ${repoPath}, so the session starts from the last fetched origin: ${firstLine(err)}`);
   }
   const originHead = async () => git(repoPath, ["symbolic-ref", "--quiet", "--short", "refs/remotes/origin/HEAD"]).catch(() => "");
   let head = await originHead();
-  if (!head) {
-    // Clones record origin/HEAD; a remote added later needs to be asked.
-    await git(repoPath, ["remote", "set-head", "origin", "--auto"], { env: networkEnv(), timeout: 30_000 }).catch(() => "");
+  if (!head || !(await hasRef(repoPath, head))) {
+    // Missing (a remote added after the clone), or pointing at a branch that's gone: ask the remote.
+    await git(repoPath, ["remote", "set-head", "origin", "--auto"], { env: networkEnv(), timeout: 15_000 }).catch(() => "");
     head = await originHead();
   }
   if (head && (await hasRef(repoPath, head))) return head;
@@ -84,21 +113,34 @@ async function baseFor(repoPath: string): Promise<string> {
  */
 export async function createSessionWorktree(cwd: string, root: string, id: string): Promise<SessionWorktree | undefined> {
   let repoPath: string;
+  let gitDir: string;
   try {
     if ((await git(cwd, ["rev-parse", "--is-inside-work-tree"])) !== "true") return undefined;
     repoPath = await git(cwd, ["rev-parse", "--show-toplevel"]);
+    gitDir = await git(cwd, ["rev-parse", "--path-format=absolute", "--git-common-dir"]);
   } catch {
     return undefined;
   }
   if (!(await hasRef(repoPath, "HEAD"))) return undefined;
 
   const baseRef = await baseFor(repoPath);
+  const baseCommit = await git(repoPath, ["rev-parse", `${baseRef}^{commit}`]);
   const branch = `mypi/${id}`;
+  if (await hasRef(gitDir, `refs/heads/${branch}`)) throw new Error(`Branch ${branch} already exists in ${repoPath}`);
   const worktreePath = path.join(root, `${path.basename(repoPath).replace(/[^\w.-]+/g, "-")}-${id}`);
   fs.mkdirSync(root, { recursive: true });
-  // --no-track: the branch's upstream is set when Ship first pushes it, not to the base it started from.
-  await git(repoPath, ["worktree", "add", "--quiet", "--no-track", "-b", branch, worktreePath, baseRef], { timeout: 120_000 });
-  return { sourceCwd: cwd, repoPath, path: worktreePath, branch, baseRef };
+  try {
+    // --no-track: the branch's upstream is set when Ship first pushes it, not to the base it started from. No hooks: a
+    // post-checkout hook that needs the new checkout's dependencies would fail every session in that repo.
+    await git(gitDir, ["-c", "core.hooksPath=/dev/null", "worktree", "add", "--quiet", "--no-track", "-b", branch, worktreePath, baseCommit],
+      { timeout: 120_000 });
+  } catch (err) {
+    // A checkout can fail halfway (a filter), leaving the new branch or worktree: both hold only the base, so drop them.
+    await git(gitDir, ["worktree", "remove", "--force", worktreePath]).catch(() => "");
+    await git(gitDir, ["branch", "-D", branch]).catch(() => "");
+    throw err;
+  }
+  return { sourceCwd: cwd, repoPath, gitDir, path: worktreePath, branch, baseRef, baseCommit };
 }
 
 /** The session's working directory: the folder it was started from, at the same place in its worktree. */
@@ -108,40 +150,67 @@ export function worktreeCwd(worktree: SessionWorktree): string {
   return fs.existsSync(dir) ? dir : worktree.path;
 }
 
+/** The worktree's registration and its HEAD, which git keeps even when the folder was deleted by hand. */
+async function registration(worktree: SessionWorktree): Promise<{ head?: string } | undefined> {
+  const list = await git(worktree.gitDir, ["worktree", "list", "--porcelain"]);
+  const target = path.resolve(worktree.path);
+  const real = fs.existsSync(target) ? fs.realpathSync(target) : target;
+  for (const entry of list.split("\n\n")) {
+    const lines = entry.split("\n");
+    const dir = lines.find((l) => l.startsWith("worktree "))?.slice("worktree ".length);
+    if (dir && (path.resolve(dir) === target || path.resolve(dir) === real)) {
+      return { head: lines.find((l) => l.startsWith("HEAD "))?.slice("HEAD ".length) };
+    }
+  }
+  return undefined;
+}
+
 /** `pushed`: a commit known to be on GitHub (the one Ship pushed), for when its remote branch is gone. */
 export async function worktreeWork(worktree: SessionWorktree, pushed?: string): Promise<WorktreeWork> {
   const exists = fs.existsSync(worktree.path);
-  const status = exists ? await git(worktree.path, ["status", "--porcelain=v1", "-z", "--no-renames", "--untracked-files=normal"]) : "";
-  // The branch's commits, and HEAD's in case the agent switched branches, that no remote branch or the base has.
-  const tips = [`refs/heads/${worktree.branch}`, ...(exists ? ["HEAD"] : [])];
-  const present: string[] = [];
-  for (const tip of tips) if (await hasRef(exists ? worktree.path : worktree.repoPath, tip)) present.push(tip);
-  const base: string[] = [];
-  for (const ref of [worktree.baseRef, pushed]) if (ref && (await hasRef(worktree.repoPath, ref))) base.push(ref);
-  const unpushed = present.length === 0 ? "0"
-    : await git(exists ? worktree.path : worktree.repoPath, ["rev-list", "--count", ...present, "--not", "--remotes", ...base]);
+  const status = exists
+    ? await git(worktree.path, ["status", "--porcelain=v1", "-z", "--no-renames", "--untracked-files=normal", "--ignored=matching"])
+    : "";
+  const records = status.split("\0").filter(Boolean);
+  const ignored = records.filter((r) => r.startsWith("!! ")).map((r) => r.slice(3));
+
+  // The branch, and the worktree's own HEAD (the agent may have switched or detached), against everything backed up.
+  const tips: string[] = [];
+  const head = (await registration(worktree))?.head;
+  for (const tip of [`refs/heads/${worktree.branch}`, head]) if (tip && (await hasRef(worktree.gitDir, tip))) tips.push(tip);
+  const known: string[] = [];
+  for (const ref of [worktree.baseRef, worktree.baseCommit, pushed]) if (ref && (await hasRef(worktree.gitDir, ref))) known.push(ref);
+  const unpushed = tips.length === 0 ? "0" : await git(worktree.gitDir, ["rev-list", "--count", ...tips, "--not", "--remotes", ...known]);
   return {
     exists,
-    uncommitted: status.split("\0").filter(Boolean).length,
+    uncommitted: records.length - ignored.length,
+    ignored: ignored.filter((p) => !disposable(p)).length,
     unpushed: Number(unpushed),
   };
 }
 
 /**
  * Remove the worktree and its branch when they hold nothing that exists elsewhere; otherwise leave both, so work is
- * never lost. `force` (an Archive the user confirmed) removes the worktree with its uncommitted changes, but still
- * keeps a branch with unpushed commits. Throws, removing nothing, when that can't be checked.
+ * never lost. `force` (an Archive the user confirmed) removes the worktree with its uncommitted and ignored files, but
+ * still keeps a branch with unpushed commits. A locked worktree stays. Throws, removing nothing, when that can't be
+ * checked.
  */
 export async function removeSessionWorktree(
   worktree: SessionWorktree,
   options: { force?: boolean; pushed?: string } = {},
 ): Promise<{ removed: boolean; branchDeleted: boolean; work: WorktreeWork }> {
   const work = await worktreeWork(worktree, options.pushed);
-  if (!options.force && (work.uncommitted > 0 || work.unpushed > 0)) return { removed: false, branchDeleted: false, work };
-  if (work.exists) await git(worktree.repoPath, ["worktree", "remove", ...(options.force ? ["--force"] : []), worktree.path]);
-  else await git(worktree.repoPath, ["worktree", "prune"]);
+  if (!options.force && work.uncommitted + work.ignored + work.unpushed > 0) return { removed: false, branchDeleted: false, work };
+  if (await registration(worktree)) {
+    // --force also covers a folder deleted by hand (its registration remains) and disposable ignored files; a single
+    // --force still refuses a locked worktree.
+    await git(worktree.gitDir, ["worktree", "remove", "--force", worktree.path]).catch(() => "");
+    if (await registration(worktree)) return { removed: false, branchDeleted: false, work };
+  } else if (work.exists) {
+    return { removed: false, branchDeleted: false, work }; // a folder git doesn't know as this worktree: not ours to delete
+  }
   if (work.unpushed > 0) return { removed: true, branchDeleted: false, work };
   // -D: a squash- or rebase-merged branch is not an ancestor of anything, yet nothing on it is unpushed.
-  await git(worktree.repoPath, ["branch", "-D", worktree.branch]).catch(() => "");
-  return { removed: true, branchDeleted: true, work };
+  await git(worktree.gitDir, ["branch", "-D", worktree.branch]).catch(() => "");
+  return { removed: true, branchDeleted: !(await hasRef(worktree.gitDir, `refs/heads/${worktree.branch}`)), work };
 }

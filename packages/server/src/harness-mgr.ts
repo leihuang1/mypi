@@ -31,6 +31,7 @@ import type {
   FileEntrySummary,
   FilePreviewResponse,
   GitCloneRequest,
+  GitStatusResponse,
   GitCloneResponse,
   ModelRef,
   OpenAIAccountUsageResponse,
@@ -59,7 +60,7 @@ import type { LoadedModelsConfig } from "./auth-loader.js";
 import { AskUserExtension, conversationState, lastReply } from "./extensions/ask-user.js";
 import { agentShellEnv, GuardExtension } from "./extensions/guard.js";
 import { createPiCompatExtension } from "./extensions/pi-compat.js";
-import { inspectGitDirectory } from "./git-service.js";
+import { inspectGitDirectory, noGitStatus } from "./git-service.js";
 import { ConflictError } from "./errors.js";
 import { pullRequestState, shipState, shipWorktree } from "./ship.js";
 import { createSessionWorktree, removeSessionWorktree, type SessionWorktree, worktreeCwd, worktreeWork } from "./worktree-service.js";
@@ -177,7 +178,7 @@ export class HarnessManager {
         // Only a worktree holds just the session's own changes.
         const meta = this.catalog.sessions.find((session) => session.id === id);
         if (!meta?.worktree) return undefined;
-        const { files, summary } = await inspectGitDirectory(meta.cwd, meta.worktree.baseRef);
+        const { files, summary } = await inspectGitDirectory(meta.cwd, meta.worktree.baseRef, meta.worktree.baseCommit);
         return { files: files.length, additions: summary.totalAdditions, deletions: summary.totalDeletions };
       },
     );
@@ -801,15 +802,16 @@ export class HarnessManager {
       }
       if (req.cwd && req.cwd.trim()) {
         const resolvedCwd = this.expandUserPath(req.cwd);
-        const inWorktree = meta.worktree && !path.relative(meta.worktree.path, resolvedCwd).startsWith("..");
-        if (meta.worktree && !inWorktree) {
-          throw new Error(`This session works in its own worktree; its folder must stay inside ${meta.worktree.path}`);
-        }
         if (
           !fs.existsSync(resolvedCwd) ||
           !fs.statSync(resolvedCwd).isDirectory()
         ) {
           throw new Error(`Working directory does not exist: ${resolvedCwd}`);
+        }
+        // Real paths: a symlink in the worktree may lead back to the checkout, and /var is /private/var.
+        const relative = meta.worktree && path.relative(fs.realpathSync(meta.worktree.path), fs.realpathSync(resolvedCwd));
+        if (relative !== undefined && (relative === ".." || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative))) {
+          throw new Error(`This session works in its own worktree; its folder must stay inside ${meta.worktree!.path}`);
         }
         meta.cwd = resolvedCwd;
       }
@@ -931,6 +933,16 @@ export class HarnessManager {
     });
   }
 
+  /** The session's changes: against its base for a worktree session, none once archived (the worktree is gone). */
+  async gitStatus(sessionId: string): Promise<GitStatusResponse> {
+    return this.trackOp(async () => {
+      const meta = this.catalog.sessions.find((s) => s.id === sessionId);
+      if (!meta) throw new Error(`Session not found: ${sessionId}`);
+      if (meta.archivedAt) return noGitStatus();
+      return inspectGitDirectory(meta.cwd, meta.worktree?.baseRef, meta.worktree?.baseCommit);
+    });
+  }
+
   async shipPreview(sessionId: string): Promise<ShipPreview> {
     return this.trackOp(async () => {
       const meta = this.catalog.sessions.find((s) => s.id === sessionId);
@@ -998,15 +1010,17 @@ export class HarnessManager {
     return this.trackOp(async () => {
       const meta = this.catalog.sessions.find((s) => s.id === sessionId);
       if (!meta) throw new Error(`Session not found: ${sessionId}`);
-      if (meta.archivedAt) return { archived: true, uncommitted: 0, unpushed: 0, session: await this.buildSessionSummary(meta) };
+      if (meta.archivedAt) return { archived: true, uncommitted: 0, ignored: 0, unpushed: 0, session: await this.buildSessionSummary(meta) };
       if (this.shipping.has(sessionId)) throw new ConflictError("正在发布中，等它结束再归档");
       const summary = await this.buildSessionSummary(meta);
       if (summary.busy) throw new ConflictError("Agent 还在工作，先停止再归档");
-      let work = { uncommitted: 0, unpushed: 0 };
+      let work = { uncommitted: 0, ignored: 0, unpushed: 0 };
       if (meta.worktree) {
-        work = await worktreeWork(meta.worktree, meta.pr?.head);
-        if (!req.force && work.uncommitted + work.unpushed > 0) return { archived: false, ...work, session: summary };
-        await removeSessionWorktree(meta.worktree, { force: true, pushed: meta.pr?.head });
+        const { exists: _, ...found } = await worktreeWork(meta.worktree, meta.pr?.head);
+        work = found;
+        if (!req.force && work.uncommitted + work.ignored + work.unpushed > 0) return { archived: false, ...work, session: summary };
+        const { removed } = await removeSessionWorktree(meta.worktree, { force: true, pushed: meta.pr?.head });
+        if (!removed) console.warn(`[mypi-server] Archived ${meta.id} but kept its locked worktree ${meta.worktree.path}`);
       }
       meta.archivedAt = Date.now();
       meta.updatedAt = meta.archivedAt;

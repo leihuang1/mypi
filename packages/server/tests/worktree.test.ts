@@ -8,6 +8,7 @@ import { createModels, fauxProvider } from "@earendil-works/pi-ai";
 import type { LoadedModelsConfig } from "../src/auth-loader.js";
 import { inspectGitDirectory } from "../src/git-service.js";
 import { HarnessManager } from "../src/harness-mgr.js";
+import { agentShellEnv } from "../src/extensions/guard.js";
 import { createSessionWorktree, removeSessionWorktree, worktreeWork } from "../src/worktree-service.js";
 
 const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "mypi-worktree-")));
@@ -105,6 +106,11 @@ it("starts a git session on its own branch and worktree from a fresh origin, lea
     assert.ok(!mgr.getRecentDirs().some((d) => d.startsWith(path.join(dir, "data"))));
 
     await assert.rejects(mgr.updateSession(session.id, { cwd: repo }), /own worktree/);
+    fs.symlinkSync(repo, path.join(worktreePath, "back"));
+    await assert.rejects(mgr.updateSession(session.id, { cwd: path.join(worktreePath, "back") }), /own worktree/, "a symlink out");
+    fs.unlinkSync(path.join(worktreePath, "back"));
+    fs.mkdirSync(path.join(worktreePath, "..cache"));
+    assert.equal((await mgr.updateSession(session.id, { cwd: path.join(worktreePath, "..cache") })).cwd, path.join(worktreePath, "..cache"));
     assert.equal((await mgr.updateSession(session.id, { cwd: worktreePath })).cwd, worktreePath);
 
     // The agent commits one change and leaves another uncommitted; then origin moves on.
@@ -167,16 +173,16 @@ it("branches from the current branch without origin, and from the last fetch whe
   git(local, "commit", "-qm", "init");
   const wt = await createSessionWorktree(local, path.join(root, "local-worktrees"), "aaaa1111");
   assert.equal(wt?.baseRef, "trunk");
-  assert.deepEqual(await worktreeWork(wt!), { exists: true, uncommitted: 0, unpushed: 0 });
+  assert.deepEqual(await worktreeWork(wt!), { exists: true, uncommitted: 0, ignored: 0, unpushed: 0 });
   write(path.join(wt!.path, "b.txt"), "b\n");
   git(wt!.path, "add", "-A");
   git(wt!.path, "commit", "-qm", "work");
-  assert.deepEqual(await worktreeWork(wt!), { exists: true, uncommitted: 0, unpushed: 1 }, "counted against the base, not all history");
+  assert.deepEqual(await worktreeWork(wt!), { exists: true, uncommitted: 0, ignored: 0, unpushed: 1 }, "counted against the base, not all history");
   assert.equal((await removeSessionWorktree(wt!)).removed, false);
 
   // The worktree folder is gone, but its branch still has the commit: keep the branch.
   fs.rmSync(wt!.path, { recursive: true, force: true });
-  assert.deepEqual(await worktreeWork(wt!), { exists: false, uncommitted: 0, unpushed: 1 });
+  assert.deepEqual(await worktreeWork(wt!), { exists: false, uncommitted: 0, ignored: 0, unpushed: 1 });
   assert.equal((await removeSessionWorktree(wt!)).removed, false);
   assert.ok(hasBranch(local, wt!.branch));
 
@@ -188,4 +194,78 @@ it("branches from the current branch without origin, and from the last fetch whe
   assert.equal(offline?.baseRef, "origin/main");
   assert.equal(git(offline!.path, "rev-parse", "HEAD"), fetched);
   assert.equal((await removeSessionWorktree(offline!)).removed, true);
+});
+
+it("keeps work that git status doesn't show, and survives the checkout or the base going away", async () => {
+  const { dir, repo, remote, upstream } = fixture("hidden");
+  upstream(".gitignore", ".env\nnode_modules/\n");
+  const wtRoot = path.join(dir, "worktrees");
+  const listed = (wtPath: string) => git(repo, "worktree", "list", "--porcelain").includes(`worktree ${wtPath}\n`);
+
+  // Regenerable output may go with the worktree; an ignored .env may not.
+  const a = (await createSessionWorktree(repo, wtRoot, "a1"))!;
+  write(path.join(a.path, "packages/app/node_modules/x/index.js"), "x\n");
+  assert.equal((await worktreeWork(a)).ignored, 0);
+  write(path.join(a.path, ".env"), "TOKEN=only-copy\n");
+  assert.equal((await worktreeWork(a)).ignored, 1);
+  assert.equal((await removeSessionWorktree(a)).removed, false);
+  assert.ok(fs.existsSync(path.join(a.path, ".env")));
+  assert.equal((await removeSessionWorktree(a, { force: true })).removed, true, "Archive, once the user agreed");
+
+  // A detached commit in a folder deleted by hand: git still has its HEAD, so it counts, and nothing is pruned.
+  const b = (await createSessionWorktree(repo, wtRoot, "b2"))!;
+  git(b.path, "checkout", "-q", "--detach");
+  write(path.join(b.path, "detached.md"), "d\n");
+  git(b.path, "add", "-A");
+  git(b.path, "commit", "-qm", "detached");
+  fs.rmSync(b.path, { recursive: true, force: true });
+  assert.equal((await worktreeWork(b)).unpushed, 1);
+  assert.equal((await removeSessionWorktree(b)).removed, false);
+  assert.ok(listed(b.path), "its registration, and the commit's last ref, stay");
+
+  // A locked worktree stays, even when forced, and isn't reported removed.
+  const c = (await createSessionWorktree(repo, wtRoot, "c3"))!;
+  git(repo, "worktree", "lock", c.path);
+  assert.deepEqual(await removeSessionWorktree(c, { force: true }).then((r) => [r.removed, r.branchDeleted]), [false, false]);
+  assert.ok(listed(c.path) && hasBranch(repo, c.branch));
+  git(repo, "worktree", "unlock", c.path);
+
+  // A session started inside another session's worktree outlives it.
+  const d = (await createSessionWorktree(c.path, wtRoot, "d4"))!;
+  assert.equal((await removeSessionWorktree(c)).removed, true);
+  assert.equal((await removeSessionWorktree(d)).removed, true);
+  assert.equal(hasBranch(repo, d.branch), false);
+
+  // The base branch is deleted: the diff falls back to the commit the session started at, not to "no changes".
+  const e = (await createSessionWorktree(repo, wtRoot, "e5"))!;
+  write(path.join(e.path, "agent.md"), "agent\n");
+  git(e.path, "add", "-A");
+  git(e.path, "commit", "-qm", "agent");
+  git(repo, "update-ref", "-d", "refs/remotes/origin/main");
+  const diff = await inspectGitDirectory(e.path, e.baseRef, e.baseCommit);
+  assert.deepEqual([diff.files.map((f) => f.path), diff.baseRef], [["agent.md"], "origin/main"]);
+  git(repo, "fetch", "-q", "origin");
+
+  // origin's default branch changed after the clone.
+  git(remote, "branch", "trunk", "main");
+  git(remote, "symbolic-ref", "HEAD", "refs/heads/trunk");
+  assert.equal((await createSessionWorktree(repo, wtRoot, "f6"))!.baseRef, "origin/trunk");
+
+  // The daemon was started with another repository selected; hooks don't run in the new checkout.
+  write(path.join(repo, ".git/hooks/post-checkout"), "#!/bin/sh\nexit 1\n");
+  fs.chmodSync(path.join(repo, ".git/hooks/post-checkout"), 0o755);
+  const other = fixture("other").repo;
+  Object.assign(process.env, { GIT_DIR: path.join(other, ".git"), GIT_WORK_TREE: other });
+  let g;
+  let shell;
+  try {
+    g = (await createSessionWorktree(repo, wtRoot, "g7"))!;
+    shell = agentShellEnv(path.join(dir, "data"), process.env);
+  } finally {
+    delete process.env.GIT_DIR;
+    delete process.env.GIT_WORK_TREE;
+  }
+  assert.equal(g.repoPath, repo);
+  assert.ok(hasBranch(repo, g.branch) && !hasBranch(other, g.branch));
+  assert.ok("GIT_DIR" in shell && shell.GIT_DIR === undefined && shell.GIT_WORK_TREE === undefined, "nor does the agent's shell");
 });

@@ -1,5 +1,6 @@
 import fs from "node:fs";
 import path from "node:path";
+import { REPO_SELECTORS } from "../worktree-service.js";
 import { defineExtension, hook, ToolTask } from "@earendil-works/pi-durable";
 
 // Level 1 guardrails (plan decision 6): the agent's shell runs with GitHub credentials removed, and a bash guard
@@ -31,6 +32,8 @@ export function agentShellEnv(dataDir: string, daemonEnv: NodeJS.ProcessEnv = pr
     GIT_ASKPASS: undefined,
     SSH_ASKPASS: undefined,
     BASH_ENV: undefined,
+    // A repository selection inherited by the daemon would point the agent's git at another checkout.
+    ...Object.fromEntries(REPO_SELECTORS.map((name) => [name, undefined])),
   };
 }
 

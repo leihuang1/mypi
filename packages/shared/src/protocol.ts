@@ -144,6 +144,8 @@ export interface ArchiveResponse {
   /** False: nothing happened, because the worktree holds the work below; ask the user, then retry with `force`. */
   archived: boolean;
   uncommitted: number;
+  /** Ignored files that aren't regenerable output (an `.env`, notes): discarded with the worktree. */
+  ignored: number;
   unpushed: number;
   session: SessionSummary;
 }

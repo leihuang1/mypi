@@ -4,16 +4,16 @@ import os from "node:os";
 import { promisify } from "node:util";
 import type { PullRequestInfo } from "@mypi/shared";
 import { ConflictError } from "./errors.js";
-import { type SessionWorktree, worktreeWork } from "./worktree-service.js";
+import { gitEnv, networkEnv as gitNetworkEnv, type SessionWorktree, worktreeWork } from "./worktree-service.js";
 
 const execFileAsync = promisify(execFile);
 
 // The daemon's own credentials, and nothing may wait for a terminal or print colour codes. Built per call, not at
 // import, so it is the environment the daemon has now.
-const networkEnv = () => ({ ...process.env, GIT_TERMINAL_PROMPT: "0", GCM_INTERACTIVE: "never", GH_PROMPT_DISABLED: "1", NO_COLOR: "1" });
+const networkEnv = () => ({ ...gitNetworkEnv(), GH_PROMPT_DISABLED: "1", NO_COLOR: "1" });
 
 async function run(command: string, cwd: string, args: string[], timeout = 15_000, env?: NodeJS.ProcessEnv): Promise<string> {
-  const { stdout } = await execFileAsync(command, args, { cwd, env: env ?? process.env, timeout, maxBuffer: 4 * 1024 * 1024 });
+  const { stdout } = await execFileAsync(command, args, { cwd, env: env ?? gitEnv(), timeout, maxBuffer: 4 * 1024 * 1024 });
   return stdout.replace(/\n$/, "");
 }
 

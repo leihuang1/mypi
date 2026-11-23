@@ -73,15 +73,15 @@ it("archives at once when there's no work, and asks first when there is", async 
     archiveSession: async (_id: string, req: ArchiveRequest) => {
       calls.push(req);
       return req.force
-        ? { archived: true, uncommitted: 1, unpushed: 2, session: { id: "s1", archivedAt: 1 } }
-        : { archived: false, uncommitted: 1, unpushed: 2, session: { id: "s1" } };
+        ? { archived: true, uncommitted: 1, ignored: 1, unpushed: 2, session: { id: "s1", archivedAt: 1 } }
+        : { archived: false, uncommitted: 1, ignored: 1, unpushed: 2, session: { id: "s1" } };
     },
   });
   state.topSheet = "ship";
   await state.handleArchive();
   assert.deepEqual(plain(calls), [{ force: false }]);
   assert.equal(alerts.length, 1);
-  assert.match(alerts[0].message, /1 个未提交的改动会被丢弃\n2 个未推送的提交会留在分支 mypi\/s1 上/);
+  assert.match(alerts[0].message, /1 个未提交的改动会被丢弃\n1 个被忽略的文件（如 .env）会被删除\n2 个未推送的提交会留在分支 mypi\/s1 上/);
   assert.equal(state.topSheet, "ship", "nothing happened yet");
   alerts[0].buttons.find((b) => b.text === "归档")!.onPress!();
   await tick();

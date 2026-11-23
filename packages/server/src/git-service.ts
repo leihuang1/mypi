@@ -3,6 +3,7 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import { promisify } from "node:util";
 import type { GitFileStatus, GitStatusResponse } from "@mypi/shared";
+import { gitEnv } from "./worktree-service.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -13,7 +14,7 @@ async function runGit(cwd: string, args: string[], noIndex = false): Promise<str
       // shortcut: cap each diff at 4 MiB; add per-file fetching before supporting larger workspaces.
       maxBuffer: 4 * 1024 * 1024,
       timeout: 10_000,
-      env: { ...process.env, GIT_OPTIONAL_LOCKS: "0", GIT_LITERAL_PATHSPECS: "1" },
+      env: gitEnv({ GIT_OPTIONAL_LOCKS: "0", GIT_LITERAL_PATHSPECS: "1" }),
     });
     return stdout;
   } catch (err) {
@@ -96,8 +97,11 @@ export function noGitStatus(): GitStatusResponse {
   };
 }
 
-/** Changes in `cwd`'s work tree: against HEAD, or with `baseRef`, against its merge-base, so local commits show too. */
-export async function inspectGitDirectory(cwd: string, baseRef?: string): Promise<GitStatusResponse> {
+/**
+ * Changes in `cwd`'s work tree: against HEAD, or with `baseRef`, against its merge-base, so local commits show too.
+ * `baseCommit` stands in when `baseRef` is gone (a deleted or renamed default branch).
+ */
+export async function inspectGitDirectory(cwd: string, baseRef?: string, baseCommit?: string): Promise<GitStatusResponse> {
   const result = noGitStatus();
   let repoRoot: string;
   try {
@@ -117,12 +121,13 @@ export async function inspectGitDirectory(cwd: string, baseRef?: string): Promis
     // An unborn repository compares both staged and unstaged files to an empty tree.
     base = (await runGit(repoRoot, ["hash-object", "-t", "tree", "/dev/null"])).trim();
   }
-  if (baseRef) {
+  for (const [ref, label] of [[baseRef, baseRef], [baseCommit, baseRef]] as const) {
+    if (!ref || result.baseRef) continue;
     try {
-      base = (await runGit(repoRoot, ["merge-base", baseRef, base])).trim();
-      result.baseRef = baseRef;
+      base = (await runGit(repoRoot, ["merge-base", ref, base])).trim();
+      result.baseRef = label;
     } catch {
-      // The base ref is gone or unrelated: show changes against HEAD.
+      // Gone or unrelated: try the next, else compare against HEAD.
     }
   }
   result.branch = (await runGit(repoRoot, ["symbolic-ref", "--quiet", "--short", "HEAD"]).catch(() => "")).trim() || undefined;
