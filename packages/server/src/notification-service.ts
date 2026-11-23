@@ -13,11 +13,26 @@ export interface ChangeStats {
 
 const ICON = { done: "✅", question: "❓", error: "⚠️" } as const;
 
-/** The first line of a reply that says something, without Markdown markers. */
-function headline(text: string | undefined): string | undefined {
-  const line = text?.split("\n").map((l) => l.replace(/^[\s#>*-]+|\*\*/g, "").trim()).find(Boolean);
-  return line?.slice(0, 200);
+/** The first line of a reply that says something, outside code blocks and without Markdown markup. */
+export function headline(text: string | undefined): string | undefined {
+  let fenced = false;
+  for (const raw of text?.split("\n") ?? []) {
+    if (/^\s*(```|~~~)/.test(raw)) {
+      fenced = !fenced;
+      continue;
+    }
+    if (fenced) continue;
+    const line = raw.trim()
+      .replace(/^(?:#{1,6}\s+|>\s*|[-*+]\s+|\d+[.)]\s+)+/, "") // headings, quotes, list markers; not "-5"
+      .replace(/\[([^\]]+)\]\([^)]*\)/g, "$1")
+      .replace(/\*\*|__|`/g, "")
+      .trim();
+    if (line) return line.slice(0, 200);
+  }
+  return undefined;
 }
+
+const STATS_TIMEOUT_MS = 5000;
 
 function noticeBody(notice: RunNotice, stats: ChangeStats | undefined): string {
   if (notice.kind === "error") {
@@ -110,8 +125,13 @@ export class NotificationService {
   private async publish(sessionId: string): Promise<void> {
     const notice = this.data.sessions[sessionId]?.pending;
     if (!notice) return;
-    const stats = notice.kind === "ended" && !notice.question
-      ? await this.changeStats?.(sessionId).catch(() => undefined)
+    // The change line is optional: a slow or failing count never holds the notice.
+    let timer: Parameters<typeof clearTimeout>[0];
+    const stats = notice.kind === "ended" && !notice.question && this.changeStats
+      ? await Promise.race([
+        this.changeStats(sessionId).catch(() => undefined),
+        new Promise<undefined>((resolve) => { timer = setTimeout(resolve, STATS_TIMEOUT_MS); }),
+      ]).finally(() => clearTimeout(timer))
       : undefined;
     // Reading the changes takes a moment: publish only if that same run is still the settled one.
     const state = this.data.sessions[sessionId];
@@ -132,7 +152,7 @@ export class NotificationService {
       event = {
         type: "notice", cursor: `${this.data.epoch}:${this.data.sequence}`, sessionId,
         title: `${ICON[kind]} ${name.replace(/[\x00-\x1f]/g, " ").slice(0, 80)}`,
-        body: noticeBody(notice, stats).slice(0, 600),
+        body: noticeBody(notice, stats).replace(/[\x00-\x09\x0b-\x1f\x7f]/g, " ").slice(0, 600),
         kind,
         ...(kind === "question" && notice.question?.choices ? { choices: notice.question.choices } : {}),
         createdAt: Date.now(),

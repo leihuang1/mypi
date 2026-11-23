@@ -4,7 +4,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { it } from "node:test";
-import { inspectGitDirectory } from "../src/git-service.js";
+import { changeStats, inspectGitDirectory } from "../src/git-service.js";
 
 it("shows net HEAD text changes once, excludes binary/net-zero, and includes large new text", async () => {
   const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "mypi-net-diff-"));
@@ -59,4 +59,28 @@ it("includes staged text in unborn repositories and propagates IO failures", asy
     assert.match(info.files[0].diff, /\+working/);
     await assert.rejects(inspectGitDirectory(path.join(cwd, "missing")));
   } finally { fs.rmSync(cwd, { recursive: true, force: true }); }
+});
+
+it("counts every changed file for a notice, binary, empty and mode-only ones too", async () => {
+  const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "mypi-stats-"));
+  const git = (...args: string[]) => execFileSync("git", args, { cwd, stdio: "pipe" });
+  const write = (name: string, content: string | Buffer) => fs.writeFileSync(path.join(cwd, name), content);
+  try {
+    git("init", "-q");
+    git("config", "user.name", "test");
+    git("config", "user.email", "test@example.com");
+    write("icon.bin", Buffer.from([0, 1]));
+    write("run.sh", "echo hi\n");
+    write("a.txt", "one\ntwo\n");
+    git("add", ".");
+    git("commit", "-qm", "base");
+    write("icon.bin", Buffer.from([0, 2]));
+    fs.chmodSync(path.join(cwd, "run.sh"), 0o755);
+    write("a.txt", "one\n2\nthree");
+    write("empty.txt", "");
+    write("new.txt", "x\ny");
+    assert.deepEqual(await changeStats(cwd), { files: 5, additions: 4, deletions: 1 });
+  } finally {
+    fs.rmSync(cwd, { recursive: true, force: true });
+  }
 });

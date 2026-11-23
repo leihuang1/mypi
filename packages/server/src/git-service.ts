@@ -97,6 +97,54 @@ export function noGitStatus(): GitStatusResponse {
   };
 }
 
+/** Where `head`'s branch left `baseRef`, or `baseCommit` when that ref is gone or unrelated. */
+async function mergeBase(repoRoot: string, head: string, baseRef?: string, baseCommit?: string): Promise<string | undefined> {
+  for (const ref of [baseRef, baseCommit]) {
+    if (!ref) continue;
+    const merged = await runGit(repoRoot, ["merge-base", ref, head]).catch(() => "");
+    if (merged.trim()) return merged.trim();
+  }
+  return undefined;
+}
+
+const COUNT_FILE_BYTES = 1024 * 1024;
+const COUNT_TOTAL_BYTES = 32 * 1024 * 1024;
+
+/**
+ * The size of the changes, for a notice: every changed path, binary and mode-only ones too, from `--numstat` and the
+ * untracked files' line counts, without building patches.
+ */
+export async function changeStats(cwd: string, baseRef?: string, baseCommit?: string): Promise<{ files: number; additions: number; deletions: number }> {
+  const repoRoot = (await runGit(cwd, ["rev-parse", "--show-toplevel"])).replace(/\n$/, "");
+  const head = (await runGit(repoRoot, ["rev-parse", "--verify", "--quiet", "HEAD"])).trim();
+  const base = (await mergeBase(repoRoot, head, baseRef, baseCommit)) ?? head;
+  const [numstat, untracked] = await Promise.all([
+    runGit(repoRoot, ["diff", "--numstat", "-z", "--no-renames", "--no-ext-diff", "--no-textconv", "--ignore-submodules=all", base, "--"]),
+    runGit(repoRoot, ["ls-files", "--others", "--exclude-standard", "-z"]),
+  ]);
+  const stats = { files: 0, additions: 0, deletions: 0 };
+  for (const record of numstat.split("\0").filter(Boolean)) {
+    const [added, deleted] = record.split("\t");
+    stats.files++;
+    stats.additions += Number(added) || 0; // "-" for a binary file
+    stats.deletions += Number(deleted) || 0;
+  }
+  let budget = COUNT_TOTAL_BYTES;
+  for (const file of untracked.split("\0").filter(Boolean)) {
+    stats.files++;
+    const full = path.join(repoRoot, file);
+    const info = await fs.lstat(full).catch(() => undefined);
+    if (!info?.isFile() || info.size > COUNT_FILE_BYTES || info.size > budget) continue;
+    budget -= info.size;
+    const data = await fs.readFile(full).catch(() => undefined);
+    if (!data?.length || data.includes(0)) continue;
+    let lines = data.at(-1) === 0x0a ? 0 : 1;
+    for (const byte of data) if (byte === 0x0a) lines++;
+    stats.additions += lines;
+  }
+  return stats;
+}
+
 /**
  * Changes in `cwd`'s work tree: against HEAD, or with `baseRef`, against its merge-base, so local commits show too.
  * `baseCommit` stands in when `baseRef` is gone (a deleted or renamed default branch).
@@ -121,15 +169,8 @@ export async function inspectGitDirectory(cwd: string, baseRef?: string, baseCom
     // An unborn repository compares both staged and unstaged files to an empty tree.
     base = (await runGit(repoRoot, ["hash-object", "-t", "tree", "/dev/null"])).trim();
   }
-  for (const [ref, label] of [[baseRef, baseRef], [baseCommit, baseRef]] as const) {
-    if (!ref || result.baseRef) continue;
-    try {
-      base = (await runGit(repoRoot, ["merge-base", ref, base])).trim();
-      result.baseRef = label;
-    } catch {
-      // Gone or unrelated: try the next, else compare against HEAD.
-    }
-  }
+  const merged = await mergeBase(repoRoot, base, baseRef, baseCommit);
+  if (merged) [base, result.baseRef] = [merged, baseRef];
   result.branch = (await runGit(repoRoot, ["symbolic-ref", "--quiet", "--short", "HEAD"]).catch(() => "")).trim() || undefined;
   const diffArgs = ["diff", "--no-color", "--src-prefix=a/", "--dst-prefix=b/", "--no-ext-diff", "--no-textconv", "--no-renames", "--ignore-submodules=all", base];
   const [statsOut, patch, untrackedOut, statusOut] = await Promise.all([

@@ -5,7 +5,7 @@ import path from "node:path";
 import { it } from "node:test";
 import { setTimeout as sleep } from "node:timers/promises";
 import { MyPiClient, type NotificationFrame, type RawAgentEvent } from "@mypi/shared";
-import { NotificationService } from "../src/notification-service.js";
+import { headline, NotificationService } from "../src/notification-service.js";
 import { startMyPiServer } from "../src/main.js";
 
 const start = (id: number): RawAgentEvent => ({ type: "run_start", inputs: [id] });
@@ -37,21 +37,44 @@ it("says when a run ends with a question, and when it ends done with its first l
       ["❓ fix login", "Keep the old API?\nyes / no", "question", ["yes", "no"]],
     ]);
 
-    // Asking and then going on anyway is not a question; the last reply with text is the summary.
-    service.events("s", [start(2), reply(ask("Tabs?")), reply(text("## **Fixed** the login redirect\n\nDetails follow.")), end(2), submitted(2)]);
+    // Asked alongside other tools, so the agent went on: still unanswered, so still a question.
+    service.events("s", [start(2), reply(ask("Tabs?")), reply(text("Waiting for you.")), end(2), submitted(2)]);
     await sleep(20);
-    assert.equal(frames.length, 2);
     assert.ok(frames[1].type === "notice");
-    assert.equal(frames[1].title, "✅ fix login");
-    assert.equal(frames[1].body, "Fixed the login redirect\n+12 −3 · 2 个文件");
-    assert.equal(frames[1].choices, undefined);
+    assert.deepEqual([frames[1].title, frames[1].body], ["❓ fix login", "Tabs?"]);
+
+    // The last reply with text is the summary.
+    service.events("s", [start(3), reply(text("## **Fixed** the login redirect\n\nDetails follow.")), end(3), submitted(3)]);
+    await sleep(20);
+    assert.equal(frames.length, 3);
+    assert.ok(frames[2].type === "notice");
+    assert.equal(frames[2].title, "✅ fix login");
+    assert.equal(frames[2].body, "Fixed the login redirect\n+12 −3 · 2 个文件");
+    assert.equal(frames[2].choices, undefined);
 
     // No text and no changes: the plain done text.
     service.events("t", [start(3), reply(), end(3), submitted(3)]);
     await sleep(20);
-    assert.ok(frames[2].type === "notice");
-    assert.equal(frames[2].body, "运行已结束，点此查看");
+    assert.ok(frames[3].type === "notice");
+    assert.equal(frames[3].body, "运行已结束，点此查看");
+
+    // After a restart the observer may have missed the run's ask: the running snapshot's entries still have it.
+    const user = { id: 2, conversationId: 0, kind: "pi.user", model: [{ role: "user", content: "go" }] };
+    const asked = { id: 3, conversationId: 0, kind: "assistant", model: [{ role: "assistant", stopReason: "toolUse", content: [ask("Which port?")] }] };
+    service.events("u", [start(5)]);
+    service.events("u", [{ ...snapshot, entries: [user, asked], run: { inputs: [5] } } as RawAgentEvent, end(5), submitted(5)]);
+    await sleep(20);
+    assert.ok(frames[4].type === "notice");
+    assert.deepEqual([frames[4].kind, frames[4].body], ["question", "Which port?"]);
   } finally { await service.close(); fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
+it("takes the headline from the first line of text, outside code, without Markdown", () => {
+  assert.equal(headline("-5 degrees fixed"), "-5 degrees fixed");
+  assert.equal(headline("```ts\nconst x = 1;\n```\nSet x."), "Set x.");
+  assert.equal(headline("1. **Fixed** `config.ts`"), "Fixed config.ts");
+  assert.equal(headline("> - [Fixed login](https://example.invalid)"), "Fixed login");
+  assert.equal(headline("\n\n"), undefined);
 });
 
 it("drops a done notice whose run was superseded while its changes were being read", async () => {

@@ -60,7 +60,7 @@ import type { LoadedModelsConfig } from "./auth-loader.js";
 import { AskUserExtension, conversationState, lastReply } from "./extensions/ask-user.js";
 import { agentShellEnv, GuardExtension } from "./extensions/guard.js";
 import { createPiCompatExtension } from "./extensions/pi-compat.js";
-import { inspectGitDirectory, noGitStatus } from "./git-service.js";
+import { changeStats, inspectGitDirectory, noGitStatus } from "./git-service.js";
 import { ConflictError } from "./errors.js";
 import { pullRequestState, shipState, shipWorktree } from "./ship.js";
 import { createSessionWorktree, removeSessionWorktree, type SessionWorktree, worktreeCwd, worktreeWork } from "./worktree-service.js";
@@ -83,6 +83,8 @@ interface CatalogEntry {
   archivedAt?: number;
   /** When the user last sent a message: work after the last Ship means the session isn't "shipped" any more. */
   lastInputAt?: number;
+  /** The submission of the last message sent, for its outcome. Cleared by reset. */
+  lastInput?: number;
   createdAt: number;
   updatedAt: number;
 }
@@ -129,8 +131,6 @@ const DEFAULT_SYSTEM_INSTRUCTIONS = [
   "You are Pi, an expert coding agent running inside a durable session managed by MyPi.",
   "You have access to read, write, edit, and bash tools operating directly in the session's working directory.",
   "Keep responses concise, accurate, and mobile-friendly when inspected from a phone screen.",
-  "The user is often away from the session. When you can't go on without their decision, call ask_user; otherwise finish the task.",
-  "Start your final reply with one line that says what you did: it becomes the notification the user sees.",
 ].join("\n");
 
 export class HarnessManager {
@@ -178,8 +178,7 @@ export class HarnessManager {
         // Only a worktree holds just the session's own changes.
         const meta = this.catalog.sessions.find((session) => session.id === id);
         if (!meta?.worktree) return undefined;
-        const { files, summary } = await inspectGitDirectory(meta.cwd, meta.worktree.baseRef, meta.worktree.baseCommit);
-        return { files: files.length, additions: summary.totalAdditions, deletions: summary.totalDeletions };
+        return changeStats(meta.cwd, meta.worktree.baseRef, meta.worktree.baseCommit);
       },
     );
   }
@@ -672,17 +671,22 @@ export class HarnessManager {
         managed.root.agent(BACKGROUND_CONTEXT),
       ]);
 
-      const busy =
-        inspection.tasks.length > 0 ||
-        inspection.submissions.some(
-          (s) => s.status === "queued" || s.status === "placed",
-        );
+      const busy = inspection.tasks.length > 0 || inspection.submissions.some((s) => s.status === "placed");
+      // Submitting to an idle conversation places the input at once; after a failed run, queued inputs wait for the
+      // next one. So queued with nothing running is stuck, not running.
+      const stuck = !busy && inspection.submissions.some((s) => s.status === "queued");
+      // The last input's outcome, from the runtime: some failures (no model, a task fault) write no assistant message.
+      const last = meta.lastInput === undefined ? undefined
+        : await (await managed.harness.submission(meta.lastInput as SubmissionId, BACKGROUND_CONTEXT))?.status(BACKGROUND_CONTEXT);
       const conversation = conversationState(ctxView.entries as unknown as RawEntryRecord[]);
+      const failed = stuck || conversation.failed ||
+        (last?.status === "unanswered" && last.reason !== "aborted" && last.reason !== "reset");
+      const finished = last?.status === "done" || last?.status === "unanswered" ? last.status === "done" : conversation.finished;
       const status: SessionStatus = meta.archivedAt ? "archived"
         : busy ? "running"
-          : conversation.question || conversation.failed ? "needs_you"
+          : conversation.question || failed ? "needs_you"
             : meta.pr?.state === "open" && (meta.lastInputAt ?? 0) <= meta.pr.shippedAt ? "shipped"
-              : conversation.started || meta.pr ? "done" : "idle";
+              : finished || meta.pr ? "done" : "idle";
 
       return {
         id: meta.id,
@@ -923,6 +927,8 @@ export class HarnessManager {
       );
 
       managed.submissionTexts.set(submission.id, req.content);
+      meta.lastInput = submission.id;
+      this.saveCatalog();
 
       const statusRecord = await submission.status(BACKGROUND_CONTEXT);
       return {
@@ -1113,6 +1119,7 @@ export class HarnessManager {
         req?.handoff?.trim() || undefined,
         BACKGROUND_CONTEXT,
       );
+      delete meta.lastInput; // the new context hasn't run
       meta.updatedAt = Date.now();
       this.saveCatalog();
       return {

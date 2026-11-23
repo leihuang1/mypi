@@ -26,12 +26,30 @@ export interface RunNoticeState {
 }
 
 function withEntry(state: RunNoticeState, entry?: RawEntryRecord): RunNoticeState {
+  // A steer answers an earlier question.
+  const next = entry?.model?.some((msg) => msg.role === "user") ? { ...state, question: undefined } : state;
   const message = entry?.model?.find((msg) => msg.role === "assistant");
-  if (!message) return state;
-  if (message.stopReason === "error") return { ...state, error: "model" };
-  // Only the run's last assistant message decides whether it ends with a question.
+  if (!message) return next;
+  if (message.stopReason === "error") return { ...next, error: "model" };
+  // A question stands until the user answers, even if the agent went on (it asked alongside other tools).
   const turn = assistantTurn(message);
-  return { ...state, question: turn.question, summary: turn.text || state.summary };
+  return { ...next, question: turn.question ?? next.question, summary: turn.text || next.summary };
+}
+
+/** The question and summary of the run in `entries`, read back from the entries since the user last spoke. */
+function recovered(state: RunNoticeState, entries: readonly RawEntryRecord[]): RunNoticeState {
+  let question: AskedQuestion | undefined;
+  let summary: string | undefined;
+  for (let i = entries.length - 1; i >= 0; i--) {
+    const messages = entries[i].model ?? [];
+    if (messages.some((msg) => msg.role === "user")) break;
+    const message = messages.find((msg) => msg.role === "assistant");
+    if (!message || message.stopReason === "error") continue;
+    const turn = assistantTurn(message);
+    question ??= turn.question;
+    summary ??= turn.text || undefined;
+  }
+  return { ...state, question, summary };
 }
 
 function settled(state: RunNoticeState, id: string, kind: RunNotice["kind"], cause?: FailureCause): RunNotice {
@@ -42,10 +60,12 @@ export function reduceRunNotice(state: RunNoticeState, event: RawAgentEvent): Ru
   switch (event.type) {
     case "snapshot": {
       let next = { ...state, running: Boolean(event.run), queued: event.inbox.length > 0 };
-      if (event.run) return { ...next, runId: event.run.inputs.join(","), pending: undefined };
+      // After a restart, the run's committed messages may not have reached this observer: read them back.
+      if (event.run) return { ...recovered(next, event.entries), runId: event.run.inputs.join(","), pending: undefined };
       // Recover a previously observed run that settled immediately before a daemon restart.
       if (state.running && state.runId) {
-        next = withEntry(next, [...event.entries].reverse().find((e) => e.model?.some((m) => m.role === "assistant"))) as typeof next;
+        const last = [...event.entries].reverse().find((e) => e.model?.some((m) => m.role === "assistant"));
+        next = recovered(withEntry(next, last), event.entries) as typeof next;
         return { ...next, pending: settled(next, state.runId, next.error ? "error" : "ended", next.error) };
       }
       return next;
