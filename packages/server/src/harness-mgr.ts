@@ -50,6 +50,7 @@ import { NotificationService } from "./notification-service.js";
 import type { LoadedModelsConfig } from "./auth-loader.js";
 import { agentShellEnv, GuardExtension } from "./extensions/guard.js";
 import { createPiCompatExtension } from "./extensions/pi-compat.js";
+import { createSessionWorktree, removeSessionWorktree, type SessionWorktree, worktreeCwd } from "./worktree-service.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -61,6 +62,8 @@ interface CatalogEntry {
   thinkingLevel: ThinkingLevel;
   /** Absent in catalogs written before the toggle existed: on. */
   ponytail?: boolean;
+  /** Set when the session works in its own worktree; `cwd` is inside it. */
+  worktree?: SessionWorktree;
   createdAt: number;
   updatedAt: number;
 }
@@ -77,6 +80,16 @@ interface ManagedSession {
   root: Conversation;
   submissionTexts: Map<number, string>;
   stopNotifications: () => Promise<void>;
+}
+
+/** The folder a session is about: the one it was started from, not its worktree. */
+function sourceDir(meta: CatalogEntry): string {
+  return meta.worktree?.sourceCwd ?? meta.cwd;
+}
+
+function worktreeFields(meta: CatalogEntry): Pick<SessionSummary, "branch" | "worktreePath" | "baseRef" | "repoPath"> {
+  const wt = meta.worktree;
+  return wt ? { branch: wt.branch, worktreePath: wt.path, baseRef: wt.baseRef, repoPath: wt.repoPath } : {};
 }
 
 const DEFAULT_SYSTEM_INSTRUCTIONS = [
@@ -245,11 +258,12 @@ export class HarnessManager {
       (a, b) => b.updatedAt - a.updatedAt,
     );
     for (const s of sortedSessions) {
-      if (s.cwd && !seen.has(s.cwd)) {
+      const dir = sourceDir(s);
+      if (dir && !seen.has(dir)) {
         try {
-          if (fs.existsSync(s.cwd) && fs.statSync(s.cwd).isDirectory()) {
-            seen.add(s.cwd);
-            recent.push(s.cwd);
+          if (fs.existsSync(dir) && fs.statSync(dir).isDirectory()) {
+            seen.add(dir);
+            recent.push(dir);
           }
         } catch {
           // Ignore inaccessible dir
@@ -620,6 +634,7 @@ export class HarnessManager {
         model: agent.model || meta.model,
         thinkingLevel: (agent.thinkingLevel as ThinkingLevel) || meta.thinkingLevel,
         ponytail: meta.ponytail !== false,
+        ...worktreeFields(meta),
         createdAt: meta.createdAt,
         updatedAt: meta.updatedAt,
         busy,
@@ -633,6 +648,7 @@ export class HarnessManager {
         model: meta.model,
         thinkingLevel: meta.thinkingLevel,
         ponytail: meta.ponytail !== false,
+        ...worktreeFields(meta),
         createdAt: meta.createdAt,
         updatedAt: meta.updatedAt,
         busy: false,
@@ -660,14 +676,18 @@ export class HarnessManager {
       }
 
       const id = crypto.randomUUID().slice(0, 8);
-      const now = Date.now();
       const defaultName =
         req.name?.trim() || `${path.basename(resolvedCwd)} (${id.slice(0, 4)})`;
+      const worktree = req.worktree === false
+        ? undefined
+        : await createSessionWorktree(resolvedCwd, path.join(this.dataDir, "worktrees"), id);
+      const now = Date.now();
 
       const meta: CatalogEntry = {
         id,
         name: defaultName,
-        cwd: resolvedCwd,
+        cwd: worktree ? worktreeCwd(worktree) : resolvedCwd,
+        worktree,
         model: req.model ?? this.modelsConfig.defaultModel,
         thinkingLevel:
           req.thinkingLevel ?? this.modelsConfig.defaultThinkingLevel,
@@ -676,6 +696,9 @@ export class HarnessManager {
         updatedAt: now,
       };
 
+      if (this.closing && worktree) {
+        await removeSessionWorktree(worktree).catch(() => {});
+      }
       this.assertOpen();
       this.catalog.sessions.push(meta);
       this.saveCatalog();
@@ -719,6 +742,10 @@ export class HarnessManager {
       }
       if (req.cwd && req.cwd.trim()) {
         const resolvedCwd = this.expandUserPath(req.cwd);
+        const inWorktree = meta.worktree && !path.relative(meta.worktree.path, resolvedCwd).startsWith("..");
+        if (meta.worktree && !inWorktree) {
+          throw new Error(`This session works in its own worktree; its folder must stay inside ${meta.worktree.path}`);
+        }
         if (
           !fs.existsSync(resolvedCwd) ||
           !fs.statSync(resolvedCwd).isDirectory()
@@ -773,6 +800,18 @@ export class HarnessManager {
         if (key.startsWith(`${meta.id}\0`)) this.toolEnvs.delete(key);
       }
 
+      if (meta.worktree) {
+        try {
+          const { removed, work } = await removeSessionWorktree(meta.worktree);
+          if (!removed) {
+            console.warn(`[mypi-server] Kept ${meta.worktree.path} and ${meta.worktree.branch} of deleted session ${meta.id}: ` +
+              `${work.uncommitted} uncommitted path(s), ${work.unpushed} unpushed commit(s)`);
+          }
+        } catch (err) {
+          console.error(`[mypi-server] Could not remove the worktree of deleted session ${meta.id}:`, err);
+        }
+      }
+
       const sessionDir = path.join(this.dataDir, "sessions", meta.id);
       const archiveDir = path.join(this.dataDir, "archive", meta.id);
       if (fs.existsSync(sessionDir)) {
@@ -805,7 +844,7 @@ export class HarnessManager {
         req.content.trim().length > 0
       ) {
         const preview = req.content.trim().split(/\r?\n/)[0].slice(0, 36);
-        meta.name = `${path.basename(meta.cwd)}: ${preview}`;
+        meta.name = `${path.basename(sourceDir(meta))}: ${preview}`;
       }
       meta.updatedAt = Date.now();
       this.saveCatalog();

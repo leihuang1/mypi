@@ -304,7 +304,7 @@ export function createRequestHandler(options: {
         // GET /v1/sessions/:id/git
         if (req.method === "GET" && subRoute === "git") {
           const summary = await manager.getSessionSummary(sessionId);
-          const gitInfo = await inspectGitDirectory(summary.cwd);
+          const gitInfo = await inspectGitDirectory(summary.cwd, summary.baseRef);
           sendJson(res, 200, gitInfo);
           return;
         }

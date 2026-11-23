@@ -101,6 +101,13 @@ export interface SessionSummary {
   thinkingLevel: ThinkingLevel;
   /** Ponytail's "smallest complete change" rules are in the agent's system prompt. */
   ponytail: boolean;
+  /** A session started in a git repo works on its own branch, in its own worktree (its `cwd`). */
+  branch?: string;
+  worktreePath?: string;
+  /** What the branch started from. Its changes are shown against their merge-base with it. */
+  baseRef?: string;
+  /** The checkout the session was started from, which the session leaves alone. */
+  repoPath?: string;
   createdAt: number;
   updatedAt: number;
   busy: boolean;
@@ -114,6 +121,8 @@ export interface CreateSessionRequest {
   thinkingLevel?: ThinkingLevel;
   /** Default true. */
   ponytail?: boolean;
+  /** Default true: in a git repo, work on a new branch in a new worktree instead of in `cwd` itself. */
+  worktree?: boolean;
 }
 
 export interface UpdateSessionRequest {
@@ -308,6 +317,8 @@ export interface GitFileStatus {
 export interface GitStatusResponse {
   isGitRepo: boolean;
   branch?: string;
+  /** Set when changes are shown against the merge-base with this ref instead of HEAD. */
+  baseRef?: string;
   clean: boolean;
   summary: {
     modified: number;

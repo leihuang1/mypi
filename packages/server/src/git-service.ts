@@ -85,7 +85,8 @@ function parseNumstat(output: string): Map<string, { additions: number; deletion
   return stats;
 }
 
-export async function inspectGitDirectory(cwd: string): Promise<GitStatusResponse> {
+/** Changes in `cwd`'s work tree: against HEAD, or with `baseRef`, against its merge-base, so local commits show too. */
+export async function inspectGitDirectory(cwd: string, baseRef?: string): Promise<GitStatusResponse> {
   const result: GitStatusResponse = {
     isGitRepo: false,
     clean: true,
@@ -112,6 +113,15 @@ export async function inspectGitDirectory(cwd: string): Promise<GitStatusRespons
     // An unborn repository compares both staged and unstaged files to an empty tree.
     base = (await runGit(repoRoot, ["hash-object", "-t", "tree", "/dev/null"])).trim();
   }
+  if (baseRef) {
+    try {
+      base = (await runGit(repoRoot, ["merge-base", baseRef, base])).trim();
+      result.baseRef = baseRef;
+    } catch {
+      // The base ref is gone or unrelated: show changes against HEAD.
+    }
+  }
+  result.branch = (await runGit(repoRoot, ["symbolic-ref", "--quiet", "--short", "HEAD"]).catch(() => "")).trim() || undefined;
   const diffArgs = ["diff", "--no-color", "--src-prefix=a/", "--dst-prefix=b/", "--no-ext-diff", "--no-textconv", "--no-renames", "--ignore-submodules=all", base];
   const [statsOut, patch, untrackedOut, statusOut] = await Promise.all([
     runGit(repoRoot, [...diffArgs, "--numstat", "-z", "--"]),

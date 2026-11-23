@@ -292,10 +292,11 @@ describe("@mypi/server integration test", () => {
         token: running.token,
       });
 
-      // Create session with cwd set to the subdirectory /repo/app
+      // Create session with cwd set to the subdirectory /repo/app, in place: the uncommitted files are the subject.
       const session = await client.createSession({
         name: "Subdir Git Test",
         cwd: subDir,
+        worktree: false,
       });
 
       const gitStatus = await client.getGitStatus(session.id);
