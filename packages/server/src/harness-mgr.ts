@@ -34,11 +34,13 @@ import type {
   OpenAIAccountUsageResponse,
   QueuedSubmissionItem,
   RawAgentEvent,
+  RawEntryRecord,
   RawSnapshotEvent,
   ResetSessionRequest,
   ResetSessionResponse,
   SendMessageRequest,
   SendMessageResponse,
+  SessionStatus,
   SessionSummary,
   SseFrame,
   ThinkingLevel,
@@ -48,8 +50,10 @@ import type {
 } from "@mypi/shared";
 import { NotificationService } from "./notification-service.js";
 import type { LoadedModelsConfig } from "./auth-loader.js";
+import { AskUserExtension, conversationState } from "./extensions/ask-user.js";
 import { agentShellEnv, GuardExtension } from "./extensions/guard.js";
 import { createPiCompatExtension } from "./extensions/pi-compat.js";
+import { inspectGitDirectory } from "./git-service.js";
 import { createSessionWorktree, removeSessionWorktree, type SessionWorktree, worktreeCwd } from "./worktree-service.js";
 
 const execFileAsync = promisify(execFile);
@@ -96,6 +100,8 @@ const DEFAULT_SYSTEM_INSTRUCTIONS = [
   "You are Pi, an expert coding agent running inside a durable session managed by MyPi.",
   "You have access to read, write, edit, and bash tools operating directly in the session's working directory.",
   "Keep responses concise, accurate, and mobile-friendly when inspected from a phone screen.",
+  "The user is often away from the session. When you can't go on without their decision, call ask_user; otherwise finish the task.",
+  "Start your final reply with one line that says what you did: it becomes the notification the user sees.",
 ].join("\n");
 
 export class HarnessManager {
@@ -131,7 +137,18 @@ export class HarnessManager {
     this.catalogPath = path.join(this.dataDir, "catalog.json");
     this.catalog = this.loadCatalog();
     this.agentEnv = agentShellEnv(this.dataDir);
-    this.notifications = new NotificationService(this.dataDir, (id) => this.catalog.sessions.find((session) => session.id === id)?.name);
+    this.notifications = new NotificationService(
+      this.dataDir,
+      (id) => this.catalog.sessions.find((session) => session.id === id)?.name,
+      undefined,
+      async (id) => {
+        // Only a worktree holds just the session's own changes.
+        const meta = this.catalog.sessions.find((session) => session.id === id);
+        if (!meta?.worktree) return undefined;
+        const { files, summary } = await inspectGitDirectory(meta.cwd, meta.worktree.baseRef);
+        return { files: files.length, additions: summary.totalAdditions, deletions: summary.totalDeletions };
+      },
+    );
   }
 
   async resumeSessions(): Promise<void> {
@@ -524,6 +541,7 @@ export class HarnessManager {
       registry.install(CodingTools);
       registry.install(createPiCompatExtension({ ponytail: () => meta.ponytail !== false }));
       registry.install(GuardExtension);
+      registry.install(AskUserExtension);
 
       const storage = await openNodeSqliteStorage(dbPath);
       const harness = await Harness.open(
@@ -626,6 +644,10 @@ export class HarnessManager {
         inspection.submissions.some(
           (s) => s.status === "queued" || s.status === "placed",
         );
+      const conversation = conversationState(ctxView.entries as unknown as RawEntryRecord[]);
+      const status: SessionStatus = busy ? "running"
+        : conversation.question || conversation.failed ? "needs_you"
+          : conversation.started ? "done" : "idle";
 
       return {
         id: meta.id,
@@ -638,6 +660,8 @@ export class HarnessManager {
         createdAt: meta.createdAt,
         updatedAt: meta.updatedAt,
         busy,
+        status,
+        ...(status === "needs_you" && conversation.question ? { question: conversation.question } : {}),
         entryCount: ctxView.entries.length,
       };
     } catch {

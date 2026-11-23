@@ -2,7 +2,38 @@ import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import type { NotificationFrame, RawAgentEvent, RunNotification } from "@mypi/shared";
-import { reduceRunNotice, type RunNoticeState } from "./notification-state.js";
+import { type RunNotice, reduceRunNotice, type RunNoticeState } from "./notification-state.js";
+
+/** A session's changes, for the "done" notice. */
+export interface ChangeStats {
+  files: number;
+  additions: number;
+  deletions: number;
+}
+
+const ICON = { done: "✅", question: "❓", error: "⚠️" } as const;
+
+/** The first line of a reply that says something, without Markdown markers. */
+function headline(text: string | undefined): string | undefined {
+  const line = text?.split("\n").map((l) => l.replace(/^[\s#>*-]+|\*\*/g, "").trim()).find(Boolean);
+  return line?.slice(0, 200);
+}
+
+function noticeBody(notice: RunNotice, stats: ChangeStats | undefined): string {
+  if (notice.kind === "error") {
+    return notice.cause === "no_model"
+      ? "执行异常：未配置可用模型，运行无法继续。点此查看"
+      : notice.cause === "model"
+        ? "执行异常：模型请求失败，运行无法继续。点此查看详情"
+        : "执行异常：执行任务中断，运行无法继续。点此查看详情";
+  }
+  if (notice.question) {
+    const choices = notice.question.choices?.join(" / ");
+    return choices ? `${notice.question.text}\n${choices}` : notice.question.text;
+  }
+  const changes = stats && stats.files > 0 ? `+${stats.additions} −${stats.deletions} · ${stats.files} 个文件` : undefined;
+  return [headline(notice.summary), changes].filter(Boolean).join("\n") || "运行已结束，点此查看";
+}
 
 interface NoticeData {
   epoch: string;
@@ -23,6 +54,8 @@ export class NotificationService {
     dataDir: string,
     private sessionName: (id: string) => string | undefined,
     private settleDelay = 1500,
+    /** The session's changes when a run ends without a question; omitted or undefined: no change line. */
+    private changeStats?: (id: string) => Promise<ChangeStats | undefined>,
   ) {
     // Separate from the retired push store: no device tokens or third-party credentials are loaded.
     this.file = path.join(dataDir, "notification-events.json");
@@ -69,16 +102,20 @@ export class NotificationService {
     if (next.pending && !next.running && (!next.queued || next.pending.kind === "error")) {
       this.timers.set(sessionId, setTimeout(() => {
         this.timers.delete(sessionId);
-        try { this.publish(sessionId); }
-        catch (err) { console.error("[mypi-notifications] Unable to persist event:", err); }
+        this.publish(sessionId).catch((err) => console.error("[mypi-notifications] Unable to persist event:", err));
       }, this.settleDelay));
     }
   }
 
-  private publish(sessionId: string): void {
+  private async publish(sessionId: string): Promise<void> {
+    const notice = this.data.sessions[sessionId]?.pending;
+    if (!notice) return;
+    const stats = notice.kind === "ended" && !notice.question
+      ? await this.changeStats?.(sessionId).catch(() => undefined)
+      : undefined;
+    // Reading the changes takes a moment: publish only if that same run is still the settled one.
     const state = this.data.sessions[sessionId];
-    const notice = state?.pending;
-    if (!notice || state.running || (state.queued && notice.kind !== "error") || this.closed) return;
+    if (!state || state.pending !== notice || state.running || (state.queued && notice.kind !== "error") || this.closed) return;
     const handled = this.data.handled[sessionId] ?? [];
     const duplicate = !notice.id || handled.includes(notice.id);
     const name = this.sessionName(sessionId);
@@ -90,15 +127,15 @@ export class NotificationService {
     };
     let event: RunNotification | undefined;
     if (!duplicate && !state.stopped && name) {
-      const body = notice.kind === "ended" ? "运行已结束，点此查看" : notice.cause === "no_model"
-        ? "执行异常：未配置可用模型，运行无法继续。点此查看"
-        : notice.cause === "model"
-          ? "执行异常：模型请求失败，运行无法继续。点此查看详情"
-          : "执行异常：执行任务中断，运行无法继续。点此查看详情";
+      const kind = notice.kind === "error" ? "error" : notice.question ? "question" : "done";
       this.data.sequence++;
       event = {
         type: "notice", cursor: `${this.data.epoch}:${this.data.sequence}`, sessionId,
-        title: name.replace(/[\x00-\x1f]/g, " ").slice(0, 80), body, createdAt: Date.now(),
+        title: `${ICON[kind]} ${name.replace(/[\x00-\x1f]/g, " ").slice(0, 80)}`,
+        body: noticeBody(notice, stats).slice(0, 600),
+        kind,
+        ...(kind === "question" && notice.question?.choices ? { choices: notice.question.choices } : {}),
+        createdAt: Date.now(),
       };
       // shortcut: replay the latest 256 notices; add paged history if long offline periods need full delivery.
       this.data.notices = [...this.data.notices, event].slice(-256);

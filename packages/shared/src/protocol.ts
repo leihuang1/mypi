@@ -93,6 +93,19 @@ export interface FilePreviewResponse {
   content: string;
 }
 
+/**
+ * idle: nothing asked yet. running: a run or queued input. needs_you: waiting on the answer to `ask_user`, or the last
+ * run failed. done: the last run finished. shipped and archived come with Ship and Archive.
+ */
+export type SessionStatus = "idle" | "running" | "needs_you" | "done" | "shipped" | "archived";
+
+/** What the agent asked with `ask_user`. */
+export interface AskedQuestion {
+  text: string;
+  /** Offered answers; the user may still type their own. */
+  choices?: string[];
+}
+
 export interface SessionSummary {
   id: string;
   name: string;
@@ -111,6 +124,10 @@ export interface SessionSummary {
   createdAt: number;
   updatedAt: number;
   busy: boolean;
+  /** Absent from daemons older than M2. */
+  status?: SessionStatus;
+  /** Set while the status is needs_you because of a question. */
+  question?: AskedQuestion;
   entryCount: number;
 }
 
@@ -161,6 +178,10 @@ export interface RunNotification {
   sessionId: string;
   title: string;
   body: string;
+  /** Absent from daemons older than M2. */
+  kind?: "done" | "question" | "error";
+  /** A question's offered answers. */
+  choices?: string[];
   createdAt: number;
 }
 

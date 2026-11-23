@@ -18,6 +18,67 @@ const assistant = (stopReason: string): RawAgentEvent => ({
   type: "message_end", entry: { id: 1, conversationId: 0, kind: "assistant", model: [{ role: "assistant", stopReason }] },
 });
 
+const reply = (...content: Record<string, unknown>[]): RawAgentEvent => ({
+  type: "message_end", entry: { id: 1, conversationId: 0, kind: "assistant", model: [{ role: "assistant", stopReason: "stop", content }] },
+});
+const text = (value: string) => ({ type: "text", text: value });
+const ask = (question: string, choices?: string[]) => ({ type: "toolCall", id: "c1", name: "ask_user", arguments: { question, choices } });
+
+it("says when a run ends with a question, and when it ends done with its first line and changes", async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "mypi-notice-kinds-"));
+  const stats = new Map([["s", { files: 2, additions: 12, deletions: 3 }]]);
+  const service = new NotificationService(dir, () => "fix login", 5, async (id) => stats.get(id));
+  const frames: NotificationFrame[] = [];
+  try {
+    service.subscribe(undefined, (frame) => { if (frame.type === "notice") frames.push(frame); });
+    service.events("s", [start(1), reply(text("Looking."), ask("Keep the old API?", ["yes", "no"])), end(1), submitted(1)]);
+    await sleep(20);
+    assert.deepEqual(frames.map((f) => f.type === "notice" && [f.title, f.body, f.kind, f.choices]), [
+      ["❓ fix login", "Keep the old API?\nyes / no", "question", ["yes", "no"]],
+    ]);
+
+    // Asking and then going on anyway is not a question; the last reply with text is the summary.
+    service.events("s", [start(2), reply(ask("Tabs?")), reply(text("## **Fixed** the login redirect\n\nDetails follow.")), end(2), submitted(2)]);
+    await sleep(20);
+    assert.equal(frames.length, 2);
+    assert.ok(frames[1].type === "notice");
+    assert.equal(frames[1].title, "✅ fix login");
+    assert.equal(frames[1].body, "Fixed the login redirect\n+12 −3 · 2 个文件");
+    assert.equal(frames[1].choices, undefined);
+
+    // No text and no changes: the plain done text.
+    service.events("t", [start(3), reply(), end(3), submitted(3)]);
+    await sleep(20);
+    assert.ok(frames[2].type === "notice");
+    assert.equal(frames[2].body, "运行已结束，点此查看");
+  } finally { await service.close(); fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
+it("drops a done notice whose run was superseded while its changes were being read", async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "mypi-notice-race-"));
+  let release!: () => void;
+  const reading = new Promise<void>((resolve) => { release = resolve; });
+  const service = new NotificationService(dir, () => "s", 5, async () => {
+    await reading;
+    return { files: 1, additions: 1, deletions: 0 };
+  });
+  const frames: NotificationFrame[] = [];
+  try {
+    service.subscribe(undefined, (frame) => { if (frame.type === "notice") frames.push(frame); });
+    service.events("s", [start(1), reply(text("First")), end(1), submitted(1)]);
+    await sleep(20);
+    service.events("s", [start(2)]);
+    release();
+    await sleep(20);
+    assert.equal(frames.length, 0, "run 1 was followed by run 2 before its notice went out");
+    service.events("s", [reply(text("Second")), end(2), submitted(2)]);
+    await sleep(20);
+    assert.equal(frames.length, 1);
+    assert.ok(frames[0].type === "notice");
+    assert.equal(frames[0].body, "Second\n+1 −0 · 1 个文件");
+  } finally { await service.close(); fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
 for (const recovery of ["retry", "compaction"]) {
   it(`notifies normally after a model error recovers through ${recovery}`, async () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), "mypi-notice-recovery-"));
@@ -100,7 +161,8 @@ it("coalesces queues, suppresses stopped runs, ignores recoverable errors and de
     const first = frames[0];
     assert.ok(first.type === "notice");
     assert.equal(first.body, "运行已结束，点此查看");
-    assert.equal(first.title, "Test session");
+    assert.equal(first.title, "✅ Test session");
+    assert.equal(first.kind, "done");
     assert.equal(first.sessionId, "s");
     service.events("s", [start(4)]);
     service.stopSession("s");

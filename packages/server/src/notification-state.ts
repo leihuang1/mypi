@@ -1,4 +1,5 @@
-import type { RawAgentEvent, RawEntryRecord } from "@mypi/shared";
+import type { AskedQuestion, RawAgentEvent, RawEntryRecord } from "@mypi/shared";
+import { assistantTurn } from "./extensions/ask-user.js";
 
 type FailureCause = "model" | "no_model" | "task";
 
@@ -6,6 +7,10 @@ export interface RunNotice {
   id: string;
   kind: "ended" | "error";
   cause?: FailureCause;
+  /** The run ended by asking this with `ask_user`. */
+  question?: AskedQuestion;
+  /** The text of the run's last assistant message that had any. */
+  summary?: string;
 }
 
 export interface RunNoticeState {
@@ -15,13 +20,22 @@ export interface RunNoticeState {
   stopped?: boolean;
   error?: FailureCause;
   terminalError?: FailureCause;
+  question?: AskedQuestion;
+  summary?: string;
   pending?: RunNotice;
 }
 
 function withEntry(state: RunNoticeState, entry?: RawEntryRecord): RunNoticeState {
   const message = entry?.model?.find((msg) => msg.role === "assistant");
-  if (message?.stopReason === "error") return { ...state, error: "model" };
-  return state;
+  if (!message) return state;
+  if (message.stopReason === "error") return { ...state, error: "model" };
+  // Only the run's last assistant message decides whether it ends with a question.
+  const turn = assistantTurn(message);
+  return { ...state, question: turn.question, summary: turn.text || state.summary };
+}
+
+function settled(state: RunNoticeState, id: string, kind: RunNotice["kind"], cause?: FailureCause): RunNotice {
+  return { id, kind, cause, question: state.question, summary: state.summary };
 }
 
 export function reduceRunNotice(state: RunNoticeState, event: RawAgentEvent): RunNoticeState {
@@ -32,14 +46,14 @@ export function reduceRunNotice(state: RunNoticeState, event: RawAgentEvent): Ru
       // Recover a previously observed run that settled immediately before a daemon restart.
       if (state.running && state.runId) {
         next = withEntry(next, [...event.entries].reverse().find((e) => e.model?.some((m) => m.role === "assistant"))) as typeof next;
-        return { ...next, pending: { id: state.runId, kind: next.error ? "error" : "ended", cause: next.error } };
+        return { ...next, pending: settled(next, state.runId, next.error ? "error" : "ended", next.error) };
       }
       return next;
     }
     case "run_start":
       return {
         ...(state.pending || state.queued || state.running ? state : {}),
-        runId: event.inputs.join(","), running: true, pending: undefined,
+        runId: event.inputs.join(","), running: true, pending: undefined, question: undefined, summary: undefined,
       };
     case "message_end":
       return withEntry(state, event.entry);
@@ -63,9 +77,10 @@ export function reduceRunNotice(state: RunNoticeState, event: RawAgentEvent): Ru
       if (!state.running || event.kind.includes("compaction")) return state;
       return { ...state, error: event.kind === "pi.generation" ? "model" : "task" };
     case "run_end":
-      return { ...state, runId: event.inputs.join(","), running: false, pending: {
-        id: event.inputs.join(","), kind: state.error ? "error" : "ended", cause: state.error,
-      } };
+      return {
+        ...state, runId: event.inputs.join(","), running: false,
+        pending: settled(state, event.inputs.join(","), state.error ? "error" : "ended", state.error),
+      };
     case "inbox_update":
       return { ...state, queued: event.items.length > 0 };
     default:
