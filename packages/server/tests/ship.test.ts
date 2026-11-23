@@ -16,6 +16,13 @@ const remote = path.join(root, "remote.git");
 const ghLog = path.join(root, "gh.log");
 const saved = { ...process.env };
 
+const git = (cwd: string, ...args: string[]) => execFileSync("git", args, { cwd, encoding: "utf8", stdio: "pipe" }).trim();
+const commit = (cwd: string, file: string, content: string, message = `edit ${file}`) => {
+  fs.writeFileSync(path.join(cwd, file), content);
+  git(cwd, "add", "-A");
+  git(cwd, "commit", "-qm", message);
+};
+
 before(() => {
   // origin is "https://github.com/owner/repo.git", which this config rewrites to a local bare repo.
   fs.writeFileSync(path.join(root, "gitconfig"), `[url "${remote}"]\n\tinsteadOf = https://github.com/owner/repo.git\n`);
@@ -25,9 +32,12 @@ before(() => {
     "#!/bin/sh",
     `printf '%s\\n' "$*" >> "${ghLog}"`,
     `if [ "$1 $2" = "pr create" ]; then`,
-    `  if [ -f "${root}/pr-exists" ]; then echo 'a pull request for branch already exists' >&2; exit 1; fi`,
+    `  if [ -f "${root}/pr-wait" ]; then while [ ! -f "${root}/release" ]; do sleep 0.05; done; fi`,
+    `  if [ -f "${root}/pr-fail" ]; then echo 'HTTP 502' >&2; exit 1; fi`,
+    `  if [ -f "${root}/pr-exists" ] || [ -f "${root}/pr-merged" ]; then echo 'a pull request for branch already exists' >&2; exit 1; fi`,
     "  echo 'Creating draft pull request'; echo 'https://github.com/owner/repo/pull/7'; exit 0",
     "fi",
+    `if [ "$1 $2" = "pr view" ] && [ -f "${root}/pr-merged" ]; then echo '{"url":"https://github.com/owner/repo/pull/2","number":2,"state":"MERGED"}'; exit 0; fi`,
     `if [ "$1 $2" = "pr view" ] && [ -f "${root}/pr-exists" ]; then echo '{"url":"https://github.com/owner/repo/pull/3","number":3,"state":"OPEN"}'; exit 0; fi`,
     // The watcher's question, answered from a file the test writes.
     `if [ "$1 $2 $4" = "pr view --json" ] && [ "$5" = state ]; then printf '{"state":"%s"}' "$(cat "${root}/pr-state" 2>/dev/null || echo OPEN)"; exit 0; fi`,
@@ -41,6 +51,12 @@ before(() => {
     GIT_ALLOW_PROTOCOL: "file",
     GIT_AUTHOR_NAME: "t", GIT_AUTHOR_EMAIL: "t@example.com", GIT_COMMITTER_NAME: "t", GIT_COMMITTER_EMAIL: "t@example.com",
   });
+  // The "GitHub" repo, with a main branch, for every test.
+  git(root, "init", "-q", "--bare", "-b", "main", remote);
+  const seed = path.join(root, "seed");
+  git(root, "clone", "-q", "https://github.com/owner/repo.git", seed);
+  commit(seed, "README.md", "hello\n", "init");
+  git(seed, "push", "-q", "origin", "main");
 });
 
 after(() => {
@@ -48,12 +64,6 @@ after(() => {
   fs.rmSync(root, { recursive: true, force: true });
 });
 
-const git = (cwd: string, ...args: string[]) => execFileSync("git", args, { cwd, encoding: "utf8", stdio: "pipe" }).trim();
-const commit = (cwd: string, file: string, content: string, message = `edit ${file}`) => {
-  fs.writeFileSync(path.join(cwd, file), content);
-  git(cwd, "add", "-A");
-  git(cwd, "commit", "-qm", message);
-};
 const ghCalls = () => (fs.existsSync(ghLog) ? fs.readFileSync(ghLog, "utf8").trim().split("\n") : []);
 
 function manager(dataDir: string): HarnessManager {
@@ -81,11 +91,8 @@ it("reads owner/name from github.com remotes only", () => {
 });
 
 it("ships the session branch as a draft PR, updates it, and never force-pushes or leaves mypi/", async () => {
-  git(root, "init", "-q", "--bare", "-b", "main", remote);
   const repo = path.join(root, "repo");
   git(root, "clone", "-q", "https://github.com/owner/repo.git", repo);
-  commit(repo, "README.md", "hello\n", "init");
-  git(repo, "push", "-q", "origin", "main");
   const mainBefore = git(remote, "rev-parse", "main");
 
   const mgr = manager(path.join(root, "data"));
@@ -184,6 +191,13 @@ it("explains why a session can't ship, over HTTP as a 409", async () => {
       assert.equal(res.status, 409);
       assert.equal(((await res.json()) as { error: { code: string } }).error.code, "conflict");
     }
+    for (const body of ["null", '{"message":42}']) {
+      const session = (await client.listSessions())[0];
+      const res = await fetch(`http://127.0.0.1:${running.port}/v1/sessions/${session.id}/ship`, {
+        method: "POST", headers: { Authorization: `Bearer ${running.token}` }, body,
+      });
+      assert.equal(res.status, 400, body);
+    }
     assert.deepEqual(reasons, ["这个会话直接在原目录里工作，没有自己的分支可以发布", "这个仓库没有 origin 远程，无法推送", "origin 不是 github.com 上的仓库，无法创建 PR"]);
   } finally {
     await running.close();
@@ -270,6 +284,101 @@ it("archives on request: warns about work first, keeps unpushed commits on the b
     assert.equal((await mgr.archiveSession(clean.id, {})).archived, true);
     assert.equal(exists(repo, `refs/heads/${clean.branch}`), false, "nothing on it: the branch goes too");
   } finally {
+    await mgr.close();
+  }
+});
+
+it("pushes only the branch, only where fetch comes from, without hooks or half-done merges", async () => {
+  const repo = path.join(root, "repo6");
+  git(root, "clone", "-q", "https://github.com/owner/repo.git", repo);
+  const mgr = manager(path.join(root, "data6"));
+  const hook = (dir: string, name: string, body: string) => fs.writeFileSync(path.join(dir, "hooks", name), `#!/bin/sh\n${body}\n`, { mode: 0o755 });
+  try {
+    const session = await mgr.createSession({ cwd: repo });
+    const wt = session.worktreePath!;
+    const branch = session.branch!;
+    const onRemote = (ref: string) => exists(remote, ref);
+    commit(wt, "k.txt", "k\n");
+
+    // A pushurl sends pushes elsewhere than the PR's repo.
+    git(repo, "config", "remote.origin.pushurl", path.join(root, "elsewhere.git"));
+    assert.match((await mgr.shipPreview(session.id)).reason!, /推送地址和拉取地址不同/);
+    await assert.rejects(mgr.shipSession(session.id, {}), /推送地址和拉取地址不同/);
+    git(repo, "config", "--unset", "remote.origin.pushurl");
+
+    // An unresolved merge isn't committed.
+    git(wt, "checkout", "-q", "-b", "side");
+    commit(wt, "k.txt", "side\n");
+    git(wt, "checkout", "-q", branch);
+    commit(wt, "k.txt", "mine\n");
+    assert.throws(() => git(wt, "merge", "-q", "side"));
+    assert.match((await mgr.shipPreview(session.id)).reason!, /冲突/);
+    await assert.rejects(mgr.shipSession(session.id, {}), /冲突/);
+    git(wt, "merge", "--abort");
+
+    // The owner's push.followTags, post-commit auto-push and message-rewriting hook don't apply.
+    git(repo, "config", "push.followTags", "true");
+    git(wt, "tag", "-a", "-m", "release", "v-release");
+    hook(path.join(repo, ".git"), "post-commit", "git push -q origin HEAD:refs/heads/main");
+    hook(path.join(repo, ".git"), "prepare-commit-msg", 'echo "hook message" > "$1"');
+    const mainBefore = git(remote, "rev-parse", "main");
+    fs.writeFileSync(path.join(wt, "l.txt"), "l\n");
+    await mgr.shipSession(session.id, { message: "Add k and l" });
+    assert.equal(git(wt, "log", "-1", "--format=%s"), "Add k and l");
+    assert.equal(git(remote, "rev-parse", "main"), mainBefore);
+    assert.equal(onRemote("refs/tags/v-release"), false, "no tags");
+    assert.equal(git(remote, "rev-parse", `refs/heads/${branch}`), git(wt, "rev-parse", "HEAD"));
+
+    // GitHub refuses the push (a ruleset): a refusal with its reason, not a server error.
+    hook(remote, "pre-receive", "echo 'repository rule violations found' >&2; exit 1");
+    commit(wt, "m.txt", "m\n");
+    await assert.rejects(mgr.shipSession(session.id, {}), (err: Error & { status?: number }) =>
+      err.status === 409 && /拒绝.*repository rule violations found/.test(err.message));
+    fs.rmSync(path.join(remote, "hooks", "pre-receive"));
+  } finally {
+    await mgr.close();
+  }
+});
+
+it("finishes a Ship whose PR wasn't opened, adopts only an open PR, and holds new work until it's done", async () => {
+  const repo = path.join(root, "repo7");
+  git(root, "clone", "-q", "https://github.com/owner/repo.git", repo);
+  const mgr = manager(path.join(root, "data7"));
+  const flag = (name: string, on: boolean) => on ? fs.writeFileSync(path.join(root, name), "") : fs.rmSync(path.join(root, name), { force: true });
+  try {
+    const session = await mgr.createSession({ cwd: repo });
+    const wt = session.worktreePath!;
+    const branch = session.branch!;
+    commit(wt, "n.txt", "n\n");
+    // The commit is also on another branch on GitHub: Ship still pushes it to the PR's.
+    git(wt, "push", "-q", "origin", `HEAD:refs/heads/backup-${session.id}`);
+
+    flag("pr-fail", true);
+    await assert.rejects(mgr.shipSession(session.id, {}), /gh pr create failed/);
+    assert.equal(git(remote, "rev-parse", `refs/heads/${branch}`), git(wt, "rev-parse", "HEAD"), "pushed before gh failed");
+    assert.equal((await mgr.shipPreview(session.id)).ready, true, "the PR is still to open");
+    flag("pr-fail", false);
+
+    // The branch's only PR was merged long ago: not this work's review.
+    flag("pr-merged", true);
+    await assert.rejects(mgr.shipSession(session.id, {}), /gh pr create failed/);
+    flag("pr-merged", false);
+
+    // While Ship waits on GitHub, nothing may start new work or take the worktree away.
+    flag("pr-wait", true);
+    const shipping = mgr.shipSession(session.id, { message: "n" });
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    const refused = (err: Error & { status?: number }) => err.status === 409 && /正在发布/.test(err.message);
+    await assert.rejects(mgr.sendMessage(session.id, { requestId: "r", content: "more" }), refused);
+    await assert.rejects(mgr.deleteSession(session.id), refused);
+    await assert.rejects(mgr.resetSession(session.id), refused);
+    assert.equal((await mgr.shipPreview(session.id)).reason, "正在发布中");
+    flag("release", true);
+    const shipped = await shipping;
+    assert.deepEqual([shipped.pr.number, shipped.pushed, shipped.session.status], [7, false, "shipped"]);
+    assert.ok((await mgr.listSessions()).some((s) => s.id === session.id));
+  } finally {
+    for (const name of ["pr-fail", "pr-merged", "pr-wait", "release"]) flag(name, false);
     await mgr.close();
   }
 });

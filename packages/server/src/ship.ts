@@ -6,6 +6,10 @@ import type { PullRequestInfo } from "@mypi/shared";
 import { ConflictError } from "./errors.js";
 import { gitEnv, networkEnv as gitNetworkEnv, type SessionWorktree, worktreeWork } from "./worktree-service.js";
 
+// The owner's hooks don't run for Ship: --no-verify skips pre-commit and pre-push, but not prepare-commit-msg (which
+// can rewrite the message the user approved) or post-commit (an auto-sync hook would push past Ship's rule).
+const NO_HOOKS = ["-c", "core.hooksPath=/dev/null"];
+
 const execFileAsync = promisify(execFile);
 
 // The daemon's own credentials, and nothing may wait for a terminal or print colour codes. Built per call, not at
@@ -35,25 +39,72 @@ export interface ShipState {
   /** The PR's base: origin's default branch. */
   base?: string;
   uncommitted: number;
+  /** Commits not on the PR branch as last fetched (or, before the first push, not on the base). */
   unpushed: number;
+  /** Commits the branch has beyond its base: something to open a PR for. */
+  ahead: number;
+}
+
+const count = async (cwd: string, tips: string[], exclude: string[]) =>
+  Number(await run("git", cwd, ["rev-list", "--count", ...tips, "--not", ...exclude]));
+
+async function hasRef(cwd: string, ref: string): Promise<boolean> {
+  return run("git", cwd, ["rev-parse", "--verify", "--quiet", `${ref}^{commit}`]).then(() => true, () => false);
+}
+
+/** Why the worktree can't be committed as it is: conflicts, or a merge, rebase or cherry-pick still in progress. */
+async function unfinished(cwd: string): Promise<string | undefined> {
+  if (await run("git", cwd, ["ls-files", "--unmerged"])) return "工作区里有未解决的冲突，先解决再发布";
+  for (const [marker, what] of [["MERGE_HEAD", "merge"], ["CHERRY_PICK_HEAD", "cherry-pick"], ["REVERT_HEAD", "revert"],
+    ["rebase-merge", "rebase"], ["rebase-apply", "rebase"]]) {
+    if (fs.existsSync(await run("git", cwd, ["rev-parse", "--path-format=absolute", "--git-path", marker]))) {
+      return `工作区里有没做完的 ${what}，先完成或放弃再发布`;
+    }
+  }
+  return undefined;
+}
+
+/**
+ * The GitHub repo `git push origin` reaches. Push must go where fetch comes from (the base came from there), to one
+ * URL: a pushurl, pushInsteadOf or second URL would send the code somewhere else than the PR. An insteadOf that
+ * rewrites both (an SSH host alias) is the owner's own routing.
+ */
+async function destination(cwd: string): Promise<{ repo?: string; problem?: string }> {
+  const configured = await run("git", cwd, ["config", "--get-all", "remote.origin.url"]).catch(() => "");
+  if (!configured) return { problem: "这个仓库没有 origin 远程，无法推送" };
+  if (configured.includes("\n")) return { problem: "origin 配置了多个地址，Ship 只推送到一个" };
+  const repo = githubRepo(configured);
+  if (!repo) return { problem: "origin 不是 github.com 上的仓库，无法创建 PR" };
+  const fetchUrl = await run("git", cwd, ["remote", "get-url", "origin"]);
+  const pushUrls = await run("git", cwd, ["remote", "get-url", "--push", "--all", "origin"]);
+  if (pushUrls !== fetchUrl) return { problem: "origin 的推送地址和拉取地址不同（pushurl 或 pushInsteadOf），Ship 不会推到别处" };
+  return { repo };
 }
 
 /** Whether the worktree can be shipped, and what it holds. */
 export async function shipState(worktree: SessionWorktree): Promise<ShipState> {
-  if (!fs.existsSync(worktree.path)) return { problem: "这个会话的工作区已经不在了", uncommitted: 0, unpushed: 0 };
-  const { uncommitted, unpushed } = await worktreeWork(worktree);
-  const refuse = (problem: string) => ({ problem, uncommitted, unpushed });
-  // The configured URL, not `remote get-url`'s: that applies insteadOf rewrites (an SSH alias, a mirror).
-  const url = await run("git", worktree.path, ["config", "--get", "remote.origin.url"]).catch(() => "");
-  const repo = githubRepo(url);
-  if (!url || !worktree.baseRef.startsWith("origin/")) return refuse("这个仓库没有 origin 远程，无法推送");
-  if (!repo) return refuse("origin 不是 github.com 上的仓库，无法创建 PR");
-  const base = worktree.baseRef.slice("origin/".length);
-  const head = await run("git", worktree.path, ["symbolic-ref", "--quiet", "--short", "HEAD"]).catch(() => "");
+  const none = { uncommitted: 0, unpushed: 0, ahead: 0 };
+  if (!fs.existsSync(worktree.path)) return { problem: "这个会话的工作区已经不在了", ...none };
+  const cwd = worktree.path;
+  const { uncommitted } = await worktreeWork(worktree);
+  const base = [worktree.baseRef, worktree.baseCommit];
+  const known: string[] = [];
+  for (const ref of base) if (ref && (await hasRef(cwd, ref))) known.push(ref);
+  const tracking = `refs/remotes/origin/${worktree.branch}`;
+  const ahead = await count(cwd, ["HEAD"], known);
+  const unpushed = await count(cwd, ["HEAD"], (await hasRef(cwd, tracking)) ? [tracking] : known);
+  const refuse = (problem: string) => ({ problem, uncommitted, unpushed, ahead });
+  if (!worktree.baseRef.startsWith("origin/")) return refuse("这个仓库没有 origin 远程，无法推送");
+  const { repo, problem } = await destination(cwd);
+  if (problem) return refuse(problem);
+  const prBase = worktree.baseRef.slice("origin/".length);
+  const head = await run("git", cwd, ["symbolic-ref", "--quiet", "--short", "HEAD"]).catch(() => "");
   // Ship's whole push rule: only the session's own mypi/ branch, never the default branch.
-  if (!/^mypi\/[\w.-]+$/.test(worktree.branch) || worktree.branch === base) return refuse(`只能推送 mypi/ 分支，不能推送 ${worktree.branch}`);
+  if (!/^mypi\/[\w.-]+$/.test(worktree.branch) || worktree.branch === prBase) return refuse(`只能推送 mypi/ 分支，不能推送 ${worktree.branch}`);
   if (head !== worktree.branch) return refuse(`工作区当前在 ${head || "游离的 HEAD"} 上，不是 ${worktree.branch}`);
-  return { repo, base, uncommitted, unpushed };
+  const busy = await unfinished(cwd);
+  if (busy) return refuse(busy);
+  return { repo, base: prBase, uncommitted, unpushed, ahead };
 }
 
 /** A PR's state on GitHub now. */
@@ -64,11 +115,13 @@ export async function pullRequestState(url: string): Promise<PullRequestInfo["st
   return state;
 }
 
+/** The branch's open PR: a merged or closed one doesn't review what was just pushed. */
 async function findPullRequest(cwd: string, repo: string, branch: string): Promise<PullRequestInfo | undefined> {
   const out = await run("gh", cwd, ["pr", "view", branch, "--repo", repo, "--json", "url,number,state"], 30_000, networkEnv()).catch(() => "");
   if (!out) return undefined;
-  const pr = JSON.parse(out) as { url: string; number: number; state: string };
-  return { url: pr.url, number: pr.number, state: pr.state.toLowerCase() as PullRequestInfo["state"] };
+  const pr = JSON.parse(out) as { url?: unknown; number?: unknown; state?: unknown };
+  if (typeof pr.url !== "string" || typeof pr.number !== "number" || String(pr.state).toLowerCase() !== "open") return undefined;
+  return { url: pr.url, number: pr.number, state: "open" };
 }
 
 /**
@@ -88,28 +141,32 @@ export async function shipWorktree(
   let committed = false;
   if (state.uncommitted > 0) {
     await run("git", cwd, ["add", "--all"]);
-    // --no-verify: Ship runs from a phone; a hook that wants a terminal or fails would just strand it.
-    await run("git", cwd, ["commit", "--quiet", "--no-verify", "--message", options.message], 60_000);
+    await run("git", cwd, [...NO_HOOKS, "commit", "--quiet", "--no-verify", "--message", options.message], 60_000);
     committed = true;
   }
   const head = await run("git", cwd, ["rev-parse", "HEAD"]);
-  const { unpushed } = await worktreeWork(worktree);
-  const published = await run("git", cwd, ["rev-parse", "--verify", "--quiet", `refs/remotes/origin/${branch}`]).catch(() => "");
-  if (unpushed === 0 && !published && !options.existing) throw new ConflictError("没有可以发布的改动");
+  if (!committed && state.ahead === 0 && !options.existing) throw new ConflictError("没有可以发布的改动");
 
-  let pushed = false;
-  if (unpushed > 0) {
-    const ref = `refs/heads/${branch}`;
-    try {
-      await run("git", cwd, ["push", "--quiet", "--no-verify", "--set-upstream", "origin", `${ref}:${ref}`], 120_000, networkEnv());
-    } catch (err) {
-      const rejected = /\[rejected\]|non-fast-forward|fetch first/.test(String((err as { stderr?: string }).stderr));
-      throw rejected
-        ? new ConflictError(`GitHub 上的 ${branch} 有本地没有的提交，Ship 不会强推：先把它们合进来再发布`)
-        : new Error(`git push failed: ${firstLine(err)}`);
+  // Always push: whatever the tracking ref says, GitHub's branch must end up at HEAD. Up to date is a no-op.
+  const ref = `refs/heads/${branch}`;
+  const tracking = `refs/remotes/origin/${branch}`;
+  const before = await run("git", cwd, ["rev-parse", "--verify", "--quiet", tracking]).catch(() => "");
+  try {
+    // Exactly this branch: no tags (push.followTags) and no submodules (push.recurseSubmodules), whatever the config.
+    await run("git", cwd, [...NO_HOOKS, "push", "--quiet", "--no-verify", "--no-follow-tags", "--recurse-submodules=no",
+      "--set-upstream", "origin", `${ref}:${ref}`], 120_000, networkEnv());
+  } catch (err) {
+    const stderr = String((err as { stderr?: string }).stderr ?? "");
+    if (/\[remote rejected\]/.test(stderr)) {
+      const why = stderr.split("\n").find((l) => l.startsWith("remote: ") && l.slice(8).trim())?.slice(8).trim()
+        ?? stderr.match(/\[remote rejected\][^(]*\(([^)]*)\)/)?.[1];
+      throw new ConflictError(`GitHub 拒绝了这次推送${why ? `：${why}` : ""}`);
     }
-    pushed = true;
+    throw /\[rejected\]|non-fast-forward|fetch first/.test(stderr)
+      ? new ConflictError(`GitHub 上的 ${branch} 有本地没有的提交，Ship 不会强推：先把它们合进来再发布`)
+      : new Error(`git push failed: ${firstLine(err)}`);
   }
+  const pushed = before !== (await run("git", cwd, ["rev-parse", "--verify", "--quiet", tracking]).catch(() => ""));
   if (options.existing) return { pr: options.existing, committed, pushed, head };
 
   const title = options.message.split("\n")[0].slice(0, 256);

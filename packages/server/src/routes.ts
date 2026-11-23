@@ -13,6 +13,7 @@ import type {
   UpdateBookmarkRequest,
   UpdateSessionRequest,
 } from "@mypi/shared";
+import { BadRequestError } from "./errors.js";
 import type { HarnessManager } from "./harness-mgr.js";
 
 function setCorsHeaders(res: ServerResponse): void {
@@ -304,9 +305,14 @@ export function createRequestHandler(options: {
 
         // GET /v1/sessions/:id/ship: what Ship would do; POST: do it
         if (subRoute === "ship" && (req.method === "GET" || req.method === "POST")) {
-          const result = req.method === "GET"
-            ? await manager.shipPreview(sessionId)
-            : await manager.shipSession(sessionId, await readJsonBody<ShipRequest>(req));
+          let body: ShipRequest | undefined;
+          if (req.method === "POST") {
+            body = await readJsonBody<ShipRequest>(req);
+            if (!body || typeof body !== "object" || (body.message !== undefined && (typeof body.message !== "string" || body.message.includes("\0")))) {
+              throw new BadRequestError("Ship takes { message?: string }");
+            }
+          }
+          const result = body ? await manager.shipSession(sessionId, body) : await manager.shipPreview(sessionId);
           sendJson(res, 200, result);
           return;
         }
@@ -388,7 +394,8 @@ export function createRequestHandler(options: {
       const message = err instanceof Error ? err.message : String(err);
       const lower = message.toLowerCase();
       // A refusal the user can act on (Ship's) carries its own 409.
-      const status = (err as { status?: number }).status === 409 ? 409
+      const own = (err as { status?: number }).status;
+      const status = own === 409 || own === 400 ? own
         : lower.includes("not found")
           ? 404
           : lower.includes("shutting down")
@@ -397,7 +404,7 @@ export function createRequestHandler(options: {
       sendError(
         res,
         status,
-        status === 409 ? "conflict" : status === 404 ? "not_found" : status === 503 ? "closing" : "internal",
+        status === 409 ? "conflict" : status === 400 ? "bad_request" : status === 404 ? "not_found" : status === 503 ? "closing" : "internal",
         message,
       );
     }

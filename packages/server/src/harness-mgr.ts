@@ -11,6 +11,7 @@ import {
   Harness,
   InboxDoc,
   ROOT_CONVERSATION_ID,
+  type HarnessInspection,
   type SubmissionId,
   watchEvents,
 } from "@earendil-works/pi-durable";
@@ -61,7 +62,7 @@ import { AskUserExtension, conversationState, lastReply } from "./extensions/ask
 import { agentShellEnv, GuardExtension } from "./extensions/guard.js";
 import { createPiCompatExtension } from "./extensions/pi-compat.js";
 import { changeStats, inspectGitDirectory, noGitStatus } from "./git-service.js";
-import { ConflictError } from "./errors.js";
+import { BadRequestError, ConflictError } from "./errors.js";
 import { pullRequestState, shipState, shipWorktree } from "./ship.js";
 import { createSessionWorktree, removeSessionWorktree, type SessionWorktree, worktreeCwd, worktreeWork } from "./worktree-service.js";
 
@@ -78,11 +79,11 @@ interface CatalogEntry {
   /** Set when the session works in its own worktree; `cwd` is inside it. */
   worktree?: SessionWorktree;
   /** The draft PR Ship opened; when it last shipped, and the commit it pushed. */
-  pr?: PullRequestInfo & { shippedAt: number; head?: string };
+  /** `input`: the last message sent when it was shipped; a message after it means new work. */
+  pr?: PullRequestInfo & { shippedAt: number; head?: string; input?: number };
   /** Archived by the user, or after the PR was merged or closed. Read-only from then on. */
   archivedAt?: number;
   /** When the user last sent a message: work after the last Ship means the session isn't "shipped" any more. */
-  lastInputAt?: number;
   /** The submission of the last message sent, for its outcome. Cleared by reset. */
   lastInput?: number;
   createdAt: number;
@@ -133,6 +134,11 @@ const DEFAULT_SYSTEM_INSTRUCTIONS = [
   "Keep responses concise, accurate, and mobile-friendly when inspected from a phone screen.",
 ].join("\n");
 
+/** A task is running or an input is placed. A queued input with neither is stuck behind a failed run (see status). */
+function running(inspection: HarnessInspection): boolean {
+  return inspection.tasks.length > 0 || inspection.submissions.some((s) => s.status === "placed");
+}
+
 export class HarnessManager {
   readonly dataDir: string;
   readonly name: string;
@@ -151,6 +157,13 @@ export class HarnessManager {
   private toolEnvs = new Map<string, NodeExecutionEnv>();
   /** Sessions with a Ship in progress: one at a time each. */
   private shipping = new Set<string>();
+  /** Messages being submitted, per session: Ship waits for them to land, and they for Ship. */
+  private admitting = new Map<string, number>();
+
+  /** Refuse anything that would start work, or remove the worktree, while Ship is committing and pushing. */
+  private assertNotShipping(sessionId: string, what: string): void {
+    if (this.shipping.has(sessionId)) throw new ConflictError(`正在发布，等它结束再${what}`);
+  }
   private prTimer: ReturnType<typeof setInterval> | undefined;
   private checkingPullRequests = false;
   private closing = false;
@@ -671,7 +684,7 @@ export class HarnessManager {
         managed.root.agent(BACKGROUND_CONTEXT),
       ]);
 
-      const busy = inspection.tasks.length > 0 || inspection.submissions.some((s) => s.status === "placed");
+      const busy = running(inspection);
       // Submitting to an idle conversation places the input at once; after a failed run, queued inputs wait for the
       // next one. So queued with nothing running is stuck, not running.
       const stuck = !busy && inspection.submissions.some((s) => s.status === "queued");
@@ -685,7 +698,7 @@ export class HarnessManager {
       const status: SessionStatus = meta.archivedAt ? "archived"
         : busy ? "running"
           : conversation.question || failed ? "needs_you"
-            : meta.pr?.state === "open" && (meta.lastInputAt ?? 0) <= meta.pr.shippedAt ? "shipped"
+            : meta.pr?.state === "open" && meta.pr.input === meta.lastInput ? "shipped"
               : finished || meta.pr ? "done" : "idle";
 
       return {
@@ -844,6 +857,7 @@ export class HarnessManager {
       if (idx === -1) {
         throw new Error(`Session not found: ${sessionId}`);
       }
+      this.assertNotShipping(sessionId, "删除");
       const [meta] = this.catalog.sessions.splice(idx, 1);
       this.saveCatalog();
 
@@ -902,41 +916,52 @@ export class HarnessManager {
         throw new Error(`Session not found: ${sessionId}`);
       }
       assertWritable(meta);
-      const managed = await this.openManagedSession(meta);
-
-      // Ensure session name auto-updates on first prompt if still generic
-      if (
-        meta.name.endsWith(`(${meta.id.slice(0, 4)})`) &&
-        req.content.trim().length > 0
-      ) {
-        const preview = req.content.trim().split(/\r?\n/)[0].slice(0, 36);
-        meta.name = `${path.basename(sourceDir(meta))}: ${preview}`;
+      this.assertNotShipping(sessionId, "发消息");
+      this.admitting.set(sessionId, (this.admitting.get(sessionId) ?? 0) + 1);
+      try {
+        return await this.admitMessage(meta, req);
+      } finally {
+        const left = (this.admitting.get(sessionId) ?? 1) - 1;
+        if (left > 0) this.admitting.set(sessionId, left);
+        else this.admitting.delete(sessionId);
       }
-      meta.updatedAt = Date.now();
-      meta.lastInputAt = meta.updatedAt;
-      this.saveCatalog();
-
-      const submission = await managed.root.submit(
-        {
-          type: "input",
-          requestId: req.requestId,
-          content: req.content,
-          whenBusy: req.whenBusy ?? "steer",
-        },
-        BACKGROUND_CONTEXT,
-      );
-
-      managed.submissionTexts.set(submission.id, req.content);
-      meta.lastInput = submission.id;
-      this.saveCatalog();
-
-      const statusRecord = await submission.status(BACKGROUND_CONTEXT);
-      return {
-        submissionId: submission.id,
-        requestId: req.requestId,
-        status: statusRecord.status,
-      };
     });
+  }
+
+  private async admitMessage(meta: CatalogEntry, req: SendMessageRequest): Promise<SendMessageResponse> {
+    const managed = await this.openManagedSession(meta);
+
+    // Ensure session name auto-updates on first prompt if still generic
+    if (
+      meta.name.endsWith(`(${meta.id.slice(0, 4)})`) &&
+      req.content.trim().length > 0
+    ) {
+      const preview = req.content.trim().split(/\r?\n/)[0].slice(0, 36);
+      meta.name = `${path.basename(sourceDir(meta))}: ${preview}`;
+    }
+    meta.updatedAt = Date.now();
+    this.saveCatalog();
+
+    const submission = await managed.root.submit(
+      {
+        type: "input",
+        requestId: req.requestId,
+        content: req.content,
+        whenBusy: req.whenBusy ?? "steer",
+      },
+      BACKGROUND_CONTEXT,
+    );
+
+    managed.submissionTexts.set(submission.id, req.content);
+    meta.lastInput = submission.id;
+    this.saveCatalog();
+
+    const statusRecord = await submission.status(BACKGROUND_CONTEXT);
+    return {
+      submissionId: submission.id,
+      requestId: req.requestId,
+      status: statusRecord.status,
+    };
   }
 
   /** The session's changes: against its base for a worktree session, none once archived (the worktree is gone). */
@@ -960,11 +985,18 @@ export class HarnessManager {
       if (!meta.worktree) {
         return { ready: false, reason: "这个会话直接在原目录里工作，没有自己的分支可以发布", uncommitted: 0, unpushed: 0, suggestedMessage: message };
       }
+      const inspection = await managed.harness.inspect(BACKGROUND_CONTEXT);
       const state = await shipState(meta.worktree);
-      const nothing = !state.problem && state.uncommitted + state.unpushed === 0;
+      // Pushed, but the PR wasn't opened or recorded (gh failed, the daemon stopped): Ship can still finish.
+      const unfinished = meta.pr?.state !== "open" && state.ahead > 0;
+      const nothing = state.uncommitted + state.unpushed === 0 && !unfinished;
+      const blocked = meta.archivedAt ? "会话已归档，只能查看"
+        : this.shipping.has(sessionId) ? "正在发布中"
+          : running(inspection) ? "Agent 还在工作，等它结束再发布" : undefined;
+      const reason = blocked ?? state.problem ?? (nothing ? (pr ? "已发布，之后没有新的改动" : "还没有可以发布的改动") : undefined);
       return {
-        ready: !state.problem && !nothing,
-        reason: state.problem ?? (nothing ? (pr ? "已发布，之后没有新的改动" : "还没有可以发布的改动") : undefined),
+        ready: !reason,
+        reason,
         branch: meta.worktree.branch,
         baseRef: meta.worktree.baseRef,
         uncommitted: state.uncommitted,
@@ -983,6 +1015,8 @@ export class HarnessManager {
       assertWritable(meta);
       if (!meta.worktree) throw new ConflictError("这个会话直接在原目录里工作，没有自己的分支可以发布");
       if (this.shipping.has(sessionId)) throw new ConflictError("正在发布中");
+      if (this.admitting.has(sessionId)) throw new ConflictError("消息正在发送，稍后再发布");
+      if (typeof req.message === "string" && req.message.length > 10_000) throw new BadRequestError("提交说明太长了");
       this.shipping.add(sessionId);
       try {
         const managed = await this.openManagedSession(meta);
@@ -990,15 +1024,13 @@ export class HarnessManager {
           managed.harness.inspect(BACKGROUND_CONTEXT),
           managed.root.context(BACKGROUND_CONTEXT),
         ]);
-        if (inspection.tasks.length > 0 || inspection.submissions.some((s) => s.status === "queued" || s.status === "placed")) {
-          throw new ConflictError("Agent 还在工作，等它结束再发布");
-        }
+        if (running(inspection)) throw new ConflictError("Agent 还在工作，等它结束再发布");
         const reply = lastReply(ctxView.entries as unknown as RawEntryRecord[]);
         const message = req.message?.trim() || suggestedMessage(meta, reply);
         const body = [reply?.slice(0, 4000), `_Shipped by MyPi from session “${meta.name}”._`].filter(Boolean).join("\n\n");
         const existing = meta.pr?.state === "open" ? { url: meta.pr.url, number: meta.pr.number, state: meta.pr.state } : undefined;
         const result = await shipWorktree(meta.worktree, { message, body, existing });
-        meta.pr = { ...result.pr, shippedAt: Date.now(), head: result.head };
+        meta.pr = { ...result.pr, shippedAt: Date.now(), head: result.head, input: meta.lastInput };
         meta.updatedAt = meta.pr.shippedAt;
         this.saveCatalog();
         return { pr: result.pr, committed: result.committed, pushed: result.pushed, session: await this.buildSessionSummary(meta) };
@@ -1089,6 +1121,7 @@ export class HarnessManager {
         throw new Error(`Session not found: ${sessionId}`);
       }
       assertWritable(meta);
+      this.assertNotShipping(sessionId, "压缩");
       const managed = await this.openManagedSession(meta);
       const taskId = await managed.root.compact(
         req?.instructions?.trim() || undefined,
@@ -1113,6 +1146,7 @@ export class HarnessManager {
         throw new Error(`Session not found: ${sessionId}`);
       }
       assertWritable(meta);
+      this.assertNotShipping(sessionId, "重置");
       const managed = await this.openManagedSession(meta);
       this.notifications.stopSession(sessionId);
       await managed.root.reset(
