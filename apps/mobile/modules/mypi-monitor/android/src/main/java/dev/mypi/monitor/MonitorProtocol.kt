@@ -8,7 +8,8 @@ internal const val QUESTION_CHANNEL = "mypi-questions"
 /** The agent's questions interrupt (heads-up); finished and failed runs don't. Daemons before M2 send no kind. */
 internal fun noticeChannel(kind: String?): String = if (kind == "question") QUESTION_CHANNEL else RUN_CHANNEL
 
-internal fun validNoticeKind(kind: String): Boolean = kind in listOf("", "done", "question", "error")
+/** A kind this app doesn't know yet (a newer daemon) shows on the run channel rather than stalling the stream. */
+internal fun validNoticeKind(kind: String): Boolean = kind.matches(Regex("[a-z_]{0,32}"))
 
 internal data class NoticeCursor(val epoch: String, val sequence: Long) {
   companion object {

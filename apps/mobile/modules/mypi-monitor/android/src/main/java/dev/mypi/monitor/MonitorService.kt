@@ -54,7 +54,7 @@ class MonitorService : Service() {
     internal fun notificationsAllowed(context: Context): Boolean {
       val manager = context.getSystemService(NotificationManager::class.java)
       return manager.areNotificationsEnabled() && (Build.VERSION.SDK_INT < 26 ||
-        listOf(STATUS_CHANNEL, RUN_CHANNEL).all { manager.getNotificationChannel(it)?.importance != NotificationManager.IMPORTANCE_NONE })
+        listOf(STATUS_CHANNEL, RUN_CHANNEL, QUESTION_CHANNEL).all { manager.getNotificationChannel(it)?.importance != NotificationManager.IMPORTANCE_NONE })
     }
 
     internal fun state(context: Context): Map<String, Any?> = mapOf(

@@ -249,8 +249,16 @@ export function SessionDetailScreen({
   const [compactInstructions, setCompactInstructions] = useState("");
   const [resetPrompt, setResetPrompt] = useState("");
   const [controlBusy, setControlBusy] = useState(false);
+  // One settings or lifecycle request at a time; a ref, so two taps in the same render can't both start one.
+  const controlBusyRef = useRef(false);
   const [shipPreview, setShipPreview] = useState<ShipPreview | null>(null);
   const [shipMessage, setShipMessage] = useState("");
+  const previewGenRef = useRef(0);
+  // The summary this screen last applied, and a generation that local changes bump so older reads are dropped.
+  const sessionRef = useRef(session);
+  sessionRef.current = session;
+  const summaryGenRef = useRef(0);
+  const lastSummaryAtRef = useRef(0);
 
   // Quick @-mention inline directory browser state
   const [quickBrowsePath, setQuickBrowsePath] = useState<string>(session.cwd);
@@ -270,12 +278,51 @@ export function SessionDetailScreen({
     workspace.refresh();
   };
 
-  // Status, the agent's question and the PR are on the summary, which changes when a run ends.
-  const refreshSummary = () => {
+  const claimControl = () => {
+    if (controlBusyRef.current) return false;
+    controlBusyRef.current = true;
+    setControlBusy(true);
+    return true;
+  };
+  const releaseControl = (targetSessionId: string) => {
+    controlBusyRef.current = false;
+    if (mountedRef.current && currentSessionIdRef.current === targetSessionId) setControlBusy(false);
+  };
+
+  /** Apply a summary from the daemon, unless it's older than one already shown (a slow read, a late snapshot). */
+  const applySummary = (updated: SessionSummary) => {
+    if (updated.id !== sessionRef.current.id || updated.updatedAt < sessionRef.current.updatedAt) return;
+    lastSummaryAtRef.current = Date.now();
+    onSessionUpdated?.(updated);
+  };
+  /** A change made here (Ship, Archive, a message): reads started before it are out of date. */
+  const appliedLocally = (updated: SessionSummary) => {
+    summaryGenRef.current++;
+    applySummary(updated);
+  };
+
+  // Status, the agent's question and the PR are on the summary, which changes when a run ends. The run's task
+  // settles just after run_end, so a summary still saying "running" is read again a few times.
+  const refreshSummary = (attempt = 0) => {
     const targetSessionId = session.id;
+    const gen = summaryGenRef.current;
+    lastSummaryAtRef.current = Date.now();
     client.getSession(targetSessionId).then((updated) => {
-      if (mountedRef.current && currentSessionIdRef.current === targetSessionId) onSessionUpdated?.(updated);
+      if (!mountedRef.current || currentSessionIdRef.current !== targetSessionId || gen !== summaryGenRef.current) return;
+      applySummary(updated);
+      if (updated.status === "running" && attempt < 4) setTimeout(() => refreshSummary(attempt + 1), 1000 * (attempt + 1));
     }).catch(() => {});
+  };
+
+  // An archive (the PR watcher's too) closes the Ship sheet: nothing in it can run any more.
+  useEffect(() => {
+    if (!session.archivedAt) return;
+    setTopSheet((sheet) => (sheet === "ship" ? null : sheet));
+    setShipPreview(null);
+  }, [session.archivedAt]);
+
+  const openPr = (url: string) => {
+    Linking.openURL(url).catch(() => Alert.alert("无法打开链接", url));
   };
 
   // Subscribe to SSE durable stream and auto-reconnect on foreground wakeup
@@ -284,10 +331,16 @@ export function SessionDetailScreen({
       onFrame: (frame) => {
         if (frame.type === "snapshot") {
           setSnapshotReady(true);
-          onSessionUpdated?.(frame.session);
+          applySummary(frame.session);
+          // Captured before the stream: it may still say running about a run that has ended.
+          if (frame.session.status === "running") setTimeout(() => refreshSummary(), 800);
         }
-        // The run's task settles just after run_end.
-        if (frame.type === "events" && frame.events.some((event) => event.type === "run_end")) setTimeout(refreshSummary, 800);
+        if (frame.type === "events" && frame.events.some((event) => event.type === "run_end")) setTimeout(() => refreshSummary(), 800);
+        // The PR watcher changes a session without a run: look again now and then while its PR is open.
+        const current = sessionRef.current;
+        if (frame.type === "heartbeat" && current.prUrl && !current.archivedAt && Date.now() - lastSummaryAtRef.current > 60_000) {
+          refreshSummary();
+        }
         if (frame.type === "snapshot" || (frame.type === "events" && frame.events.some(
           (event) => event.type === "tool_execution_end" || event.type === "run_end",
         ))) workspace.refresh();
@@ -416,6 +469,11 @@ export function SessionDetailScreen({
       await client.sendMessage(targetSessionId, request);
       if (getSessionView(viewKey).failedDraft !== pending) return;
       saveSessionView(viewKey, { failedDraft: null });
+      // Answered: the question goes until a newer summary says otherwise.
+      if (currentSessionIdRef.current === targetSessionId && sessionRef.current.question) {
+        summaryGenRef.current++;
+        onSessionUpdated?.({ ...sessionRef.current, status: "running", question: undefined });
+      }
       if (mountedRef.current && currentSessionIdRef.current === targetSessionId) {
         setFailedDraft(null);
         setConnError(null);
@@ -500,11 +558,11 @@ export function SessionDetailScreen({
     cwd?: string;
     ponytail?: boolean;
   }) => {
+    if (!claimControl()) return;
     const targetSessionId = session.id;
-    setControlBusy(true);
     try {
       const updated = await client.updateSession(targetSessionId, patch);
-      onSessionUpdated?.(updated);
+      appliedLocally(updated);
       if (
         !mountedRef.current ||
         currentSessionIdRef.current !== targetSessionId
@@ -525,16 +583,13 @@ export function SessionDetailScreen({
         setConnError(err instanceof Error ? err.message : String(err));
       }
     } finally {
-      if (mountedRef.current && currentSessionIdRef.current === targetSessionId) {
-        setControlBusy(false);
-      }
+      releaseControl(targetSessionId);
     }
   };
 
   const handleCompact = async () => {
-    if (controlBusy) return;
+    if (!claimControl()) return;
     const targetSessionId = session.id;
-    setControlBusy(true);
     try {
       await client.compactSession(targetSessionId, {
         instructions: compactInstructions.trim() || undefined,
@@ -548,16 +603,13 @@ export function SessionDetailScreen({
         setConnError(err instanceof Error ? err.message : String(err));
       }
     } finally {
-      if (mountedRef.current && currentSessionIdRef.current === targetSessionId) {
-        setControlBusy(false);
-      }
+      releaseControl(targetSessionId);
     }
   };
 
   const handleReset = async () => {
-    if (controlBusy) return;
+    if (!claimControl()) return;
     const targetSessionId = session.id;
-    setControlBusy(true);
     try {
       await client.resetSession(targetSessionId, {
         handoff: resetPrompt.trim() || undefined,
@@ -571,9 +623,7 @@ export function SessionDetailScreen({
         setConnError(err instanceof Error ? err.message : String(err));
       }
     } finally {
-      if (mountedRef.current && currentSessionIdRef.current === targetSessionId) {
-        setControlBusy(false);
-      }
+      releaseControl(targetSessionId);
     }
   };
 
@@ -583,33 +633,35 @@ export function SessionDetailScreen({
       return;
     }
     const targetSessionId = session.id;
+    const gen = ++previewGenRef.current;
     setTopSheet("ship");
     setShipPreview(null);
+    const current = () => mountedRef.current && currentSessionIdRef.current === targetSessionId && gen === previewGenRef.current;
     try {
       const preview = await client.getShipPreview(targetSessionId);
-      if (mountedRef.current && currentSessionIdRef.current === targetSessionId) {
+      if (current()) {
         setShipPreview(preview);
         setShipMessage(preview.suggestedMessage);
       }
     } catch (err) {
-      if (mountedRef.current && currentSessionIdRef.current === targetSessionId) {
+      if (current()) {
+        setTopSheet(null);
         setConnError(err instanceof Error ? err.message : String(err));
       }
     }
   };
 
   const handleShip = async () => {
-    if (controlBusy || !shipPreview?.ready) return;
+    if (!shipPreview?.ready || !claimControl()) return;
     const targetSessionId = session.id;
-    setControlBusy(true);
     try {
       const result = await client.shipSession(targetSessionId, { message: shipMessage.trim() || undefined });
-      onSessionUpdated?.(result.session);
+      appliedLocally(result.session);
       if (mountedRef.current && currentSessionIdRef.current === targetSessionId) {
         setTopSheet(null);
         Alert.alert(`已发布到 PR #${result.pr.number}`, result.pr.url, [
           { text: "关闭", style: "cancel" },
-          { text: "打开 PR", onPress: () => { void Linking.openURL(result.pr.url); } },
+          { text: "打开 PR", onPress: () => openPr(result.pr.url) },
         ]);
       }
     } catch (err) {
@@ -617,20 +669,17 @@ export function SessionDetailScreen({
         setConnError(err instanceof Error ? err.message : String(err));
       }
     } finally {
-      if (mountedRef.current && currentSessionIdRef.current === targetSessionId) {
-        setControlBusy(false);
-      }
+      releaseControl(targetSessionId);
     }
   };
 
   /** Archive; when the worktree still holds work, say what happens to it and ask first. */
   const handleArchive = async (force = false) => {
-    if (controlBusy) return;
+    if (!claimControl()) return;
     const targetSessionId = session.id;
-    setControlBusy(true);
     try {
       const result = await client.archiveSession(targetSessionId, { force });
-      onSessionUpdated?.(result.session);
+      appliedLocally(result.session);
       if (!mountedRef.current || currentSessionIdRef.current !== targetSessionId) return;
       if (result.archived) {
         setTopSheet(null);
@@ -650,9 +699,7 @@ export function SessionDetailScreen({
         setConnError(err instanceof Error ? err.message : String(err));
       }
     } finally {
-      if (mountedRef.current && currentSessionIdRef.current === targetSessionId) {
-        setControlBusy(false);
-      }
+      releaseControl(targetSessionId);
     }
   };
 
@@ -916,7 +963,7 @@ export function SessionDetailScreen({
           )}
           <View style={styles.cwdSwitchRow}>
             {session.prUrl ? (
-              <Pressable style={styles.popoverSecondaryBtn} onPress={() => { void Linking.openURL(session.prUrl!); }}>
+              <Pressable style={styles.popoverSecondaryBtn} onPress={() => openPr(session.prUrl!)}>
                 <Text style={styles.popoverSecondaryBtnText}>打开 PR</Text>
               </Pressable>
             ) : <View />}

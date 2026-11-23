@@ -11,8 +11,9 @@ class MonitorProtocolTest {
     assertEquals(RUN_CHANNEL, noticeChannel("error"))
     assertEquals(RUN_CHANNEL, noticeChannel(""))
     assertEquals(RUN_CHANNEL, noticeChannel(null))
-    assertTrue(validNoticeKind("") && validNoticeKind("question"))
-    assertFalse(validNoticeKind("other"))
+    assertTrue(validNoticeKind("") && validNoticeKind("question") && validNoticeKind("review_ready"))
+    assertEquals(RUN_CHANNEL, noticeChannel("review_ready"))
+    assertFalse(validNoticeKind("x".repeat(33)) || validNoticeKind("Question\n"))
   }
 
   @Test fun onlyCompleteSseEventsAreDelivered() {

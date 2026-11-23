@@ -34,7 +34,7 @@ class MyPiMonitorModule : Module() {
       require(json.length <= 16_384) { "Server configuration too large" }
       check(appContext.currentActivity != null) { "请在 App 中开启后台监听" }
       MonitorService.createChannels(context)
-      check(MonitorService.notificationsAllowed(context)) { "请在系统设置中允许 MyPi 的运行动态和后台监听通知" }
+      check(MonitorService.notificationsAllowed(context)) { "请在系统设置中允许 MyPi 的运行动态、需要你回答和后台监听通知" }
       val server = MonitorServer.parse(JSONObject(json))
       val store = MonitorStore(context)
       val previous = store.servers()

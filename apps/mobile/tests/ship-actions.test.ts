@@ -8,31 +8,46 @@ const tick = () => new Promise<void>((resolve) => setImmediate(resolve));
 // Objects the handlers build come from the screen's VM context, with its own Object prototype.
 const plain = (value: unknown) => JSON.parse(JSON.stringify(value));
 
-function screen(client: Record<string, unknown>) {
+function screen(client: Record<string, unknown>, session: Record<string, unknown> = { id: "s1", branch: "mypi/s1", updatedAt: 1 }) {
   const alerts: { title: string; message: string; buttons: Button[] }[] = [];
-  const updates: unknown[] = [];
+  const updates: any[] = [];
   const opened: string[] = [];
   const sent: { content: string; whenBusy?: string }[] = [];
+  const views: Record<string, any> = {};
   const state: Record<string, any> = {
-    session: { id: "s1", branch: "mypi/s1" },
-    client,
+    session,
+    client: { sendMessage: async (_id: string, request: { content: string; whenBusy?: string }) => { sent.push(request); }, ...client },
     topSheet: null, controlBusy: false, shipPreview: null, shipMessage: "", sending: false, failedDraft: null, error: null,
     mountedRef: { current: true }, currentSessionIdRef: { current: "s1" }, isNearBottomRef: { current: false },
-    onSessionUpdated: (summary: unknown) => updates.push(summary),
+    controlBusyRef: { current: false }, previewGenRef: { current: 0 }, sessionRef: { current: session },
+    summaryGenRef: { current: 0 }, lastSummaryAtRef: { current: 0 }, viewKey: "v",
+    onSessionUpdated: (summary: any) => { updates.push(summary); state.session = summary; state.sessionRef.current = summary; },
     Alert: { alert: (title: string, message: string, buttons: Button[]) => alerts.push({ title, message, buttons }) },
     Linking: { openURL: async (url: string) => { opened.push(url); } },
-    submitMessage: async (request: { content: string; whenBusy?: string }) => { sent.push(request); },
+    saveSessionView: (key: string, patch: object) => { views[key] = { ...views[key], ...patch }; },
+    getSessionView: (key: string) => views[key] ?? {},
+    persistSessionViews: async () => {},
   };
-  for (const name of ["topSheet", "shipPreview", "shipMessage", "controlBusy"]) {
-    state[`set${name[0].toUpperCase()}${name.slice(1)}`] = (value: unknown) => { state[name] = value; };
+  for (const name of ["topSheet", "shipPreview", "shipMessage", "controlBusy", "sending", "failedDraft"]) {
+    state[`set${name[0].toUpperCase()}${name.slice(1)}`] = (value: unknown) => {
+      state[name] = typeof value === "function" ? (value as (prev: unknown) => unknown)(state[name]) : value;
+    };
   }
   state.setConnError = (value: unknown) => { state.error = value; };
   const handlers = loadScreenHandlers(
     new URL("../src/screens/SessionDetailScreen.tsx", import.meta.url),
-    ["openShip", "handleShip", "handleArchive", "handleAnswer"],
+    ["claimControl", "releaseControl", "applySummary", "appliedLocally", "openPr", "submitMessage",
+      "openShip", "handleShip", "handleArchive", "handleAnswer"],
     state,
   );
   return { state: handlers, alerts, updates, opened, sent };
+}
+
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  let reject!: (err: unknown) => void;
+  const promise = new Promise<T>((res, rej) => { resolve = res; reject = rej; });
+  return { promise, resolve, reject };
 }
 
 const preview: ShipPreview = {
@@ -46,7 +61,7 @@ it("ships with the message the user left, and offers to open the PR", async () =
     getShipPreview: async () => preview,
     shipSession: async (_id: string, req: ShipRequest) => {
       shipped.push(req);
-      return { pr, committed: true, pushed: true, session: { id: "s1", prUrl: pr.url } };
+      return { pr, committed: true, pushed: true, session: { id: "s1", prUrl: pr.url, updatedAt: 2 } };
     },
   });
   await state.openShip();
@@ -55,7 +70,7 @@ it("ships with the message the user left, and offers to open the PR", async () =
   state.shipMessage = "  Fix the login redirect  ";
   await state.handleShip();
   assert.deepEqual(plain(shipped), [{ message: "Fix the login redirect" }]);
-  assert.deepEqual(updates, [{ id: "s1", prUrl: pr.url }]);
+  assert.deepEqual(plain(updates), [{ id: "s1", prUrl: pr.url, updatedAt: 2 }]);
   assert.equal(state.topSheet, null);
   assert.equal(alerts[0].title, "已发布到 PR #7");
   alerts[0].buttons.find((b) => b.text === "打开 PR")!.onPress!();
@@ -73,8 +88,8 @@ it("archives at once when there's no work, and asks first when there is", async 
     archiveSession: async (_id: string, req: ArchiveRequest) => {
       calls.push(req);
       return req.force
-        ? { archived: true, uncommitted: 1, ignored: 1, unpushed: 2, session: { id: "s1", archivedAt: 1 } }
-        : { archived: false, uncommitted: 1, ignored: 1, unpushed: 2, session: { id: "s1" } };
+        ? { archived: true, uncommitted: 1, ignored: 1, unpushed: 2, session: { id: "s1", branch: "mypi/s1", archivedAt: 1, updatedAt: 3 } }
+        : { archived: false, uncommitted: 1, ignored: 1, unpushed: 2, session: { id: "s1", branch: "mypi/s1", updatedAt: 1 } };
     },
   });
   state.topSheet = "ship";
@@ -89,11 +104,59 @@ it("archives at once when there's no work, and asks first when there is", async 
   assert.equal(state.topSheet, null);
 });
 
-it("answers the agent's question with the chosen text", async () => {
-  const { state, sent } = screen({});
+it("answers the agent's question with the chosen text, and the question goes once it's sent", async () => {
+  const { state, sent, updates } = screen({}, { id: "s1", updatedAt: 1, status: "needs_you", question: { text: "Tabs?", choices: ["tabs"] } });
   await state.handleAnswer("tabs");
   assert.deepEqual(plain(sent.map((r) => [r.content, r.whenBusy])), [["tabs", "steer"]]);
+  assert.deepEqual([updates.at(-1).status, updates.at(-1).question], ["running", undefined], "no stale chips at the next run_end");
   state.sending = true;
   await state.handleAnswer("spaces");
   assert.equal(sent.length, 1, "not while a message is being sent");
+});
+
+it("keeps one request at a time, the latest preview, and the newest summary", async () => {
+  const shipping = deferred<unknown>();
+  const previews = [deferred<ShipPreview>(), deferred<ShipPreview>()];
+  let ships = 0;
+  const { state, alerts, updates } = screen({
+    getShipPreview: () => previews.shift()!.promise,
+    shipSession: () => { ships++; return shipping.promise; },
+  });
+  const [first, second] = previews;
+
+  // Opened, closed and opened again: the first, slower answer doesn't replace the second or the user's edit.
+  const opening = state.openShip();
+  void state.openShip();
+  const reopening = state.openShip();
+  second.resolve({ ...preview, suggestedMessage: "Second" });
+  await reopening;
+  state.shipMessage = "Edited";
+  first.resolve({ ...preview, suggestedMessage: "First" });
+  await opening;
+  assert.deepEqual([state.topSheet, state.shipMessage, state.shipPreview.suggestedMessage], ["ship", "Edited", "Second"]);
+
+  // Two taps in one render send one Ship.
+  void state.handleShip();
+  void state.handleShip();
+  assert.equal(ships, 1);
+  shipping.resolve({ pr: { url: "u", number: 1, state: "open" }, committed: false, pushed: true, session: { id: "s1", updatedAt: 5 } });
+  await tick();
+  assert.equal(state.controlBusyRef.current, false);
+
+  // A summary read before the Ship finished is older: it doesn't take the PR away.
+  state.applySummary({ id: "s1", updatedAt: 4 });
+  assert.equal(updates.at(-1).updatedAt, 5);
+
+  // The browser won't open: say so.
+  state.Linking.openURL = async () => { throw new Error("no browser"); };
+  state.openPr("https://github.com/o/r/pull/1");
+  await tick();
+  assert.equal(alerts.at(-1)!.title, "无法打开链接");
+});
+
+it("closes the Ship sheet when its preview can't be read", async () => {
+  const { state } = screen({ getShipPreview: async () => { throw new Error("会话已归档，只能查看"); } });
+  await state.openShip();
+  assert.equal(state.topSheet, null);
+  assert.match(String(state.error), /会话已归档，只能查看/);
 });
