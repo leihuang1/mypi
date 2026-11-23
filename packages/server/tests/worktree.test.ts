@@ -19,6 +19,7 @@ before(() => {
   Object.assign(process.env, {
     GIT_CONFIG_GLOBAL: path.join(root, "gitconfig"),
     GIT_CONFIG_NOSYSTEM: "1",
+    GIT_ALLOW_PROTOCOL: "file", // fixtures are local; nothing may reach a real remote
     GIT_AUTHOR_NAME: "test", GIT_AUTHOR_EMAIL: "test@example.com",
     GIT_COMMITTER_NAME: "test", GIT_COMMITTER_EMAIL: "test@example.com",
   });

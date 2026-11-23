@@ -99,6 +99,42 @@ export interface FilePreviewResponse {
  */
 export type SessionStatus = "idle" | "running" | "needs_you" | "done" | "shipped" | "archived";
 
+export interface PullRequestInfo {
+  url: string;
+  number: number;
+  state: "open" | "merged" | "closed";
+}
+
+/** What Ship would do now. */
+export interface ShipPreview {
+  /** False when Ship can't run or has nothing to do; `reason` says why. */
+  ready: boolean;
+  reason?: string;
+  branch?: string;
+  baseRef?: string;
+  /** Changed paths Ship would commit with the message. */
+  uncommitted: number;
+  /** Commits not on GitHub yet. */
+  unpushed: number;
+  /** The first line of the agent's last reply: the commit message and a new PR's title, unless the user edits it. */
+  suggestedMessage: string;
+  pr?: PullRequestInfo;
+}
+
+export interface ShipRequest {
+  /** Default: the preview's `suggestedMessage`. */
+  message?: string;
+}
+
+export interface ShipResponse {
+  pr: PullRequestInfo;
+  /** Ship made a commit of the uncommitted changes. */
+  committed: boolean;
+  /** Ship pushed new commits; false when the branch was already on GitHub. */
+  pushed: boolean;
+  session: SessionSummary;
+}
+
 /** What the agent asked with `ask_user`. */
 export interface AskedQuestion {
   text: string;
@@ -128,6 +164,9 @@ export interface SessionSummary {
   status?: SessionStatus;
   /** Set while the status is needs_you because of a question. */
   question?: AskedQuestion;
+  /** The draft PR Ship opened. */
+  prUrl?: string;
+  prState?: PullRequestInfo["state"];
   entryCount: number;
 }
 

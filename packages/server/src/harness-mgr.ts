@@ -32,6 +32,7 @@ import type {
   GitCloneResponse,
   ModelRef,
   OpenAIAccountUsageResponse,
+  PullRequestInfo,
   QueuedSubmissionItem,
   RawAgentEvent,
   RawEntryRecord,
@@ -42,6 +43,9 @@ import type {
   SendMessageResponse,
   SessionStatus,
   SessionSummary,
+  ShipPreview,
+  ShipRequest,
+  ShipResponse,
   SseFrame,
   ThinkingLevel,
   UpdateBookmarkRequest,
@@ -50,10 +54,11 @@ import type {
 } from "@mypi/shared";
 import { NotificationService } from "./notification-service.js";
 import type { LoadedModelsConfig } from "./auth-loader.js";
-import { AskUserExtension, conversationState } from "./extensions/ask-user.js";
+import { AskUserExtension, conversationState, lastReply } from "./extensions/ask-user.js";
 import { agentShellEnv, GuardExtension } from "./extensions/guard.js";
 import { createPiCompatExtension } from "./extensions/pi-compat.js";
 import { inspectGitDirectory } from "./git-service.js";
+import { ShipError, shipState, shipWorktree } from "./ship.js";
 import { createSessionWorktree, removeSessionWorktree, type SessionWorktree, worktreeCwd } from "./worktree-service.js";
 
 const execFileAsync = promisify(execFile);
@@ -68,6 +73,10 @@ interface CatalogEntry {
   ponytail?: boolean;
   /** Set when the session works in its own worktree; `cwd` is inside it. */
   worktree?: SessionWorktree;
+  /** The draft PR Ship opened, and when it last shipped. */
+  pr?: PullRequestInfo & { shippedAt: number };
+  /** When the user last sent a message: work after the last Ship means the session isn't "shipped" any more. */
+  lastInputAt?: number;
   createdAt: number;
   updatedAt: number;
 }
@@ -91,9 +100,18 @@ function sourceDir(meta: CatalogEntry): string {
   return meta.worktree?.sourceCwd ?? meta.cwd;
 }
 
-function worktreeFields(meta: CatalogEntry): Pick<SessionSummary, "branch" | "worktreePath" | "baseRef" | "repoPath"> {
+function worktreeFields(meta: CatalogEntry): Pick<SessionSummary, "branch" | "worktreePath" | "baseRef" | "repoPath" | "prUrl" | "prState"> {
   const wt = meta.worktree;
-  return wt ? { branch: wt.branch, worktreePath: wt.path, baseRef: wt.baseRef, repoPath: wt.repoPath } : {};
+  return {
+    ...(wt ? { branch: wt.branch, worktreePath: wt.path, baseRef: wt.baseRef, repoPath: wt.repoPath } : {}),
+    ...(meta.pr ? { prUrl: meta.pr.url, prState: meta.pr.state } : {}),
+  };
+}
+
+/** The commit message and PR title Ship suggests: the first line of the agent's last reply. */
+function suggestedMessage(meta: CatalogEntry, reply: string | undefined): string {
+  const line = reply?.split("\n").map((l) => l.replace(/^[\s#>*-]+|\*\*/g, "").trim()).find(Boolean);
+  return (line || meta.name).slice(0, 200);
 }
 
 const DEFAULT_SYSTEM_INSTRUCTIONS = [
@@ -120,6 +138,8 @@ export class HarnessManager {
   private readonly agentEnv: NodeJS.ProcessEnv;
   /** One environment per session and directory, so their tool processes can be killed on shutdown. */
   private toolEnvs = new Map<string, NodeExecutionEnv>();
+  /** Sessions with a Ship in progress: one at a time each. */
+  private shipping = new Set<string>();
   private closing = false;
   private closePromise: Promise<void> | null = null;
 
@@ -647,7 +667,8 @@ export class HarnessManager {
       const conversation = conversationState(ctxView.entries as unknown as RawEntryRecord[]);
       const status: SessionStatus = busy ? "running"
         : conversation.question || conversation.failed ? "needs_you"
-          : conversation.started ? "done" : "idle";
+          : meta.pr && (meta.lastInputAt ?? 0) <= meta.pr.shippedAt ? "shipped"
+            : conversation.started ? "done" : "idle";
 
       return {
         id: meta.id,
@@ -871,6 +892,7 @@ export class HarnessManager {
         meta.name = `${path.basename(sourceDir(meta))}: ${preview}`;
       }
       meta.updatedAt = Date.now();
+      meta.lastInputAt = meta.updatedAt;
       this.saveCatalog();
 
       const submission = await managed.root.submit(
@@ -891,6 +913,64 @@ export class HarnessManager {
         requestId: req.requestId,
         status: statusRecord.status,
       };
+    });
+  }
+
+  async shipPreview(sessionId: string): Promise<ShipPreview> {
+    return this.trackOp(async () => {
+      const meta = this.catalog.sessions.find((s) => s.id === sessionId);
+      if (!meta) throw new Error(`Session not found: ${sessionId}`);
+      const managed = await this.openManagedSession(meta);
+      const ctxView = await managed.root.context(BACKGROUND_CONTEXT);
+      const message = suggestedMessage(meta, lastReply(ctxView.entries as unknown as RawEntryRecord[]));
+      const pr = meta.pr && { url: meta.pr.url, number: meta.pr.number, state: meta.pr.state };
+      if (!meta.worktree) {
+        return { ready: false, reason: "这个会话直接在原目录里工作，没有自己的分支可以发布", uncommitted: 0, unpushed: 0, suggestedMessage: message };
+      }
+      const state = await shipState(meta.worktree);
+      const nothing = !state.problem && state.uncommitted + state.unpushed === 0;
+      return {
+        ready: !state.problem && !nothing,
+        reason: state.problem ?? (nothing ? (pr ? "已发布，之后没有新的改动" : "还没有可以发布的改动") : undefined),
+        branch: meta.worktree.branch,
+        baseRef: meta.worktree.baseRef,
+        uncommitted: state.uncommitted,
+        unpushed: state.unpushed,
+        suggestedMessage: message,
+        pr,
+      };
+    });
+  }
+
+  /** Commit, push `mypi/<id>` and open a draft PR (or update the open one) with the daemon's credentials. */
+  async shipSession(sessionId: string, req: ShipRequest): Promise<ShipResponse> {
+    return this.trackOp(async () => {
+      const meta = this.catalog.sessions.find((s) => s.id === sessionId);
+      if (!meta) throw new Error(`Session not found: ${sessionId}`);
+      if (!meta.worktree) throw new ShipError("这个会话直接在原目录里工作，没有自己的分支可以发布");
+      if (this.shipping.has(sessionId)) throw new ShipError("正在发布中");
+      this.shipping.add(sessionId);
+      try {
+        const managed = await this.openManagedSession(meta);
+        const [inspection, ctxView] = await Promise.all([
+          managed.harness.inspect(BACKGROUND_CONTEXT),
+          managed.root.context(BACKGROUND_CONTEXT),
+        ]);
+        if (inspection.tasks.length > 0 || inspection.submissions.some((s) => s.status === "queued" || s.status === "placed")) {
+          throw new ShipError("Agent 还在工作，等它结束再发布");
+        }
+        const reply = lastReply(ctxView.entries as unknown as RawEntryRecord[]);
+        const message = req.message?.trim() || suggestedMessage(meta, reply);
+        const body = [reply?.slice(0, 4000), `_Shipped by MyPi from session “${meta.name}”._`].filter(Boolean).join("\n\n");
+        const existing = meta.pr?.state === "open" ? { url: meta.pr.url, number: meta.pr.number, state: meta.pr.state } : undefined;
+        const result = await shipWorktree(meta.worktree, { message, body, existing });
+        meta.pr = { ...result.pr, shippedAt: Date.now() };
+        meta.updatedAt = meta.pr.shippedAt;
+        this.saveCatalog();
+        return { pr: result.pr, committed: result.committed, pushed: result.pushed, session: await this.buildSessionSummary(meta) };
+      } finally {
+        this.shipping.delete(sessionId);
+      }
     });
   }
 

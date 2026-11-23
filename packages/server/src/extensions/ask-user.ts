@@ -47,6 +47,19 @@ export function assistantTurn(message: Record<string, unknown>): { text: string;
   return { text: text.trim(), question: asked };
 }
 
+/** The text of the last assistant message that has any: the agent's latest reply. */
+export function lastReply(entries: readonly RawEntryRecord[]): string | undefined {
+  for (let i = entries.length - 1; i >= 0; i--) {
+    const messages = (entries[i].model ?? []) as Record<string, unknown>[];
+    for (let j = messages.length - 1; j >= 0; j--) {
+      if (messages[j].role !== "assistant") continue;
+      const { text } = assistantTurn(messages[j]);
+      if (text) return text;
+    }
+  }
+  return undefined;
+}
+
 /**
  * Where a conversation stands, from its last model messages: waiting on the user's answer to `ask_user`, stopped by
  * a failed model request, and whether the user has said anything at all.

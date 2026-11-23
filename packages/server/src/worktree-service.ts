@@ -27,8 +27,9 @@ export interface WorktreeWork {
   unpushed: number;
 }
 
-// Network operations must fail rather than wait for a password: the daemon has no terminal.
-const NETWORK_ENV = { ...process.env, GIT_TERMINAL_PROMPT: "0", GCM_INTERACTIVE: "never" };
+// Network operations must fail rather than wait for a password: the daemon has no terminal. Built per call, not at
+// import, so it is the environment the daemon has now.
+const networkEnv = () => ({ ...process.env, GIT_TERMINAL_PROMPT: "0", GCM_INTERACTIVE: "never" });
 
 async function git(cwd: string, args: string[], options: { env?: NodeJS.ProcessEnv; timeout?: number } = {}): Promise<string> {
   const { stdout } = await execFileAsync("git", args, {
@@ -59,7 +60,7 @@ async function baseFor(repoPath: string): Promise<string> {
     return (await git(repoPath, ["symbolic-ref", "--quiet", "--short", "HEAD"]).catch(() => "")) || git(repoPath, ["rev-parse", "HEAD"]);
   }
   try {
-    await git(repoPath, ["fetch", "--quiet", "--prune", "origin"], { env: NETWORK_ENV, timeout: 60_000 });
+    await git(repoPath, ["fetch", "--quiet", "--prune", "origin"], { env: networkEnv(), timeout: 60_000 });
   } catch (err) {
     console.warn(`[mypi-server] git fetch failed in ${repoPath}, so the session starts from the last fetched origin: ${firstLine(err)}`);
   }
@@ -67,7 +68,7 @@ async function baseFor(repoPath: string): Promise<string> {
   let head = await originHead();
   if (!head) {
     // Clones record origin/HEAD; a remote added later needs to be asked.
-    await git(repoPath, ["remote", "set-head", "origin", "--auto"], { env: NETWORK_ENV, timeout: 30_000 }).catch(() => "");
+    await git(repoPath, ["remote", "set-head", "origin", "--auto"], { env: networkEnv(), timeout: 30_000 }).catch(() => "");
     head = await originHead();
   }
   if (head && (await hasRef(repoPath, head))) return head;

@@ -17,6 +17,9 @@ import type {
   SendMessageRequest,
   SendMessageResponse,
   SessionSummary,
+  ShipPreview,
+  ShipRequest,
+  ShipResponse,
   SseFrame,
   UpdateBookmarkRequest,
   UpdateBookmarkResponse,
@@ -333,6 +336,17 @@ export class MyPiClient {
         body: JSON.stringify({}),
       },
     );
+  }
+
+  async getShipPreview(sessionId: string): Promise<ShipPreview> {
+    return this.request<ShipPreview>(`/v1/sessions/${encodeURIComponent(sessionId)}/ship`);
+  }
+
+  async shipSession(sessionId: string, req: ShipRequest = {}): Promise<ShipResponse> {
+    return this.request<ShipResponse>(`/v1/sessions/${encodeURIComponent(sessionId)}/ship`, {
+      method: "POST",
+      body: JSON.stringify(req),
+    });
   }
 
   async getGitStatus(sessionId: string): Promise<GitStatusResponse> {

@@ -29,6 +29,7 @@ it("ends a run on ask_user, shows the question, and reports done with the change
   Object.assign(process.env, {
     HOME: path.join(root, "home"),
     GIT_CONFIG_GLOBAL: path.join(root, "gitconfig"), GIT_CONFIG_NOSYSTEM: "1",
+    GIT_ALLOW_PROTOCOL: "file", // fixtures are local; nothing may reach a real remote
     GIT_AUTHOR_NAME: "t", GIT_AUTHOR_EMAIL: "t@example.com", GIT_COMMITTER_NAME: "t", GIT_COMMITTER_EMAIL: "t@example.com",
   });
   git(root, "init", "-q", "--bare", "-b", "main", "remote.git");

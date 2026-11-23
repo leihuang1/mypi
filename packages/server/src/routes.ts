@@ -7,6 +7,7 @@ import type {
   NotificationFrame,
   ResetSessionRequest,
   SendMessageRequest,
+  ShipRequest,
   SseFrame,
   UpdateBookmarkRequest,
   UpdateSessionRequest,
@@ -301,6 +302,15 @@ export function createRequestHandler(options: {
           return;
         }
 
+        // GET /v1/sessions/:id/ship: what Ship would do; POST: do it
+        if (subRoute === "ship" && (req.method === "GET" || req.method === "POST")) {
+          const result = req.method === "GET"
+            ? await manager.shipPreview(sessionId)
+            : await manager.shipSession(sessionId, await readJsonBody<ShipRequest>(req));
+          sendJson(res, 200, result);
+          return;
+        }
+
         // GET /v1/sessions/:id/git
         if (req.method === "GET" && subRoute === "git") {
           const summary = await manager.getSessionSummary(sessionId);
@@ -372,15 +382,17 @@ export function createRequestHandler(options: {
       }
       const message = err instanceof Error ? err.message : String(err);
       const lower = message.toLowerCase();
-      const status = lower.includes("not found")
-        ? 404
-        : lower.includes("shutting down")
-          ? 503
-          : 500;
+      // A refusal the user can act on (Ship's) carries its own 409.
+      const status = (err as { status?: number }).status === 409 ? 409
+        : lower.includes("not found")
+          ? 404
+          : lower.includes("shutting down")
+            ? 503
+            : 500;
       sendError(
         res,
         status,
-        status === 404 ? "not_found" : status === 503 ? "closing" : "internal",
+        status === 409 ? "conflict" : status === 404 ? "not_found" : status === 503 ? "closing" : "internal",
         message,
       );
     }
