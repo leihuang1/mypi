@@ -201,7 +201,13 @@ export async function removeSessionWorktree(
 ): Promise<{ removed: boolean; branchDeleted: boolean; work: WorktreeWork }> {
   const work = await worktreeWork(worktree, options.pushed);
   if (!options.force && work.uncommitted + work.ignored + work.unpushed > 0) return { removed: false, branchDeleted: false, work };
-  if (await registration(worktree)) {
+  const registered = await registration(worktree);
+  if (registered?.head && work.unpushed > 0 &&
+    !(await git(worktree.gitDir, ["branch", "--contains", registered.head, "--format=%(refname)"]))) {
+    // Commits on a detached HEAD go with the worktree's HEAD: keep them on a branch of their own.
+    await git(worktree.gitDir, ["branch", `${worktree.branch}-detached`, registered.head]);
+  }
+  if (registered) {
     // --force also covers a folder deleted by hand (its registration remains) and disposable ignored files; a single
     // --force still refuses a locked worktree.
     await git(worktree.gitDir, ["worktree", "remove", "--force", worktree.path]).catch(() => "");

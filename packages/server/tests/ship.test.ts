@@ -4,7 +4,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { after, before, it } from "node:test";
-import { createModels, fauxProvider } from "@earendil-works/pi-ai";
+import { createModels, fauxAssistantMessage, fauxProvider } from "@earendil-works/pi-ai";
 import { MyPiClient } from "@mypi/shared";
 import type { LoadedModelsConfig } from "../src/auth-loader.js";
 import { HarnessManager } from "../src/harness-mgr.js";
@@ -40,7 +40,10 @@ before(() => {
     `if [ "$1 $2" = "pr view" ] && [ -f "${root}/pr-merged" ]; then echo '{"url":"https://github.com/owner/repo/pull/2","number":2,"state":"MERGED"}'; exit 0; fi`,
     `if [ "$1 $2" = "pr view" ] && [ -f "${root}/pr-exists" ]; then echo '{"url":"https://github.com/owner/repo/pull/3","number":3,"state":"OPEN"}'; exit 0; fi`,
     // The watcher's question, answered from a file the test writes.
-    `if [ "$1 $2 $4" = "pr view --json" ] && [ "$5" = state ]; then printf '{"state":"%s"}' "$(cat "${root}/pr-state" 2>/dev/null || echo OPEN)"; exit 0; fi`,
+    `if [ "$1 $2 $4" = "pr view --json" ] && [ "$5" = state,headRefOid ]; then`,
+    `  if [ -f "${root}/view-wait" ]; then while [ ! -f "${root}/release" ]; do sleep 0.05; done; fi`,
+    `  printf '{"state":"%s"%s}' "$(cat "${root}/pr-state" 2>/dev/null || echo OPEN)" "$([ -f "${root}/pr-head" ] && printf ',"headRefOid":"%s"' "$(cat "${root}/pr-head")")"; exit 0`,
+    "fi",
     "exit 1",
     "",
   ].join("\n"), { mode: 0o755 });
@@ -191,12 +194,12 @@ it("explains why a session can't ship, over HTTP as a 409", async () => {
       assert.equal(res.status, 409);
       assert.equal(((await res.json()) as { error: { code: string } }).error.code, "conflict");
     }
-    for (const body of ["null", '{"message":42}']) {
+    for (const [route, body] of [["ship", "null"], ["ship", '{"message":42}'], ["archive", '{"force":"false"}'], ["archive", "null"]]) {
       const session = (await client.listSessions())[0];
-      const res = await fetch(`http://127.0.0.1:${running.port}/v1/sessions/${session.id}/ship`, {
+      const res = await fetch(`http://127.0.0.1:${running.port}/v1/sessions/${session.id}/${route}`, {
         method: "POST", headers: { Authorization: `Bearer ${running.token}` }, body,
       });
-      assert.equal(res.status, 400, body);
+      assert.equal(res.status, 400, `${route} ${body}`);
     }
     assert.deepEqual(reasons, ["这个会话直接在原目录里工作，没有自己的分支可以发布", "这个仓库没有 origin 远程，无法推送", "origin 不是 github.com 上的仓库，无法创建 PR"]);
   } finally {
@@ -237,7 +240,7 @@ it("archives a session once its PR is merged, even after GitHub deleted its bran
     assert.deepEqual([after.status, after.prState], ["archived", "merged"]);
     assert.equal(fs.existsSync(merged.worktreePath!), false);
     assert.equal(exists(repo, `refs/heads/${merged.branch}`), false);
-    assert.ok(ghCalls().includes(`pr view ${after.prUrl} --json state`));
+    assert.ok(ghCalls().includes(`pr view ${after.prUrl} --json state,headRefOid`));
 
     const kept = await mgr.getSessionSummary(busy.id);
     assert.deepEqual([kept.status, kept.prState], ["done", "merged"], "new uncommitted work keeps it");
@@ -279,6 +282,17 @@ it("archives on request: warns about work first, keeps unpushed commits on the b
     await assert.rejects(mgr.compactSession(session.id), readOnly);
     await assert.rejects(mgr.resetSession(session.id), readOnly);
     assert.equal((await mgr.archiveSession(session.id, {})).archived, true, "archiving again is a no-op");
+    const { updatedAt } = await mgr.getSessionSummary(session.id);
+    await mgr.abortSession(session.id);
+    assert.equal((await mgr.getSessionSummary(session.id)).updatedAt, updatedAt, "Stop changes nothing");
+
+    // A commit on a detached HEAD isn't on the session branch: a forced archive keeps it on a branch of its own.
+    const detached = await mgr.createSession({ cwd: repo });
+    git(detached.worktreePath!, "checkout", "-q", "--detach");
+    commit(detached.worktreePath!, "dh.txt", "dh\n", "detached work");
+    assert.equal((await mgr.archiveSession(detached.id, { force: "yes" as unknown as boolean })).archived, false, "only true confirms");
+    assert.equal((await mgr.archiveSession(detached.id, { force: true })).archived, true);
+    assert.equal(git(repo, "log", "-1", "--format=%s", `${detached.branch}-detached`), "detached work");
 
     const clean = await mgr.createSession({ cwd: repo });
     assert.equal((await mgr.archiveSession(clean.id, {})).archived, true);
@@ -379,6 +393,73 @@ it("finishes a Ship whose PR wasn't opened, adopts only an open PR, and holds ne
     assert.ok((await mgr.listSessions()).some((s) => s.id === session.id));
   } finally {
     for (const name of ["pr-fail", "pr-merged", "pr-wait", "release"]) flag(name, false);
+    await mgr.close();
+  }
+});
+
+it("cleans up only what is safe: not while the agent works, not a closed PR's force-pushed work, not a reopened PR", async () => {
+  const repo = path.join(root, "repo8");
+  git(root, "clone", "-q", "https://github.com/owner/repo.git", repo);
+  const flag = (name: string, value?: string) => value === undefined
+    ? fs.rmSync(path.join(root, name), { force: true }) : fs.writeFileSync(path.join(root, name), value);
+  const faux = fauxProvider({ provider: "faux", models: [{ id: "faux-1" }] });
+  const models = createModels();
+  models.setProvider(faux.provider);
+  const mgr = new HarnessManager({ dataDir: path.join(root, "data8"), startDirs: [], modelsConfig: {
+    models, availableModels: [], defaultModel: { provider: "faux", modelId: "faux-1" }, defaultThinkingLevel: "off",
+    openaiAuth: { configured: false, authType: "none" }, getOpenAIRateLimits: () => undefined,
+  } });
+  let release = () => {};
+  try {
+    // The agent is working when the PR is merged: its worktree stays, and Archive refuses.
+    const working = await mgr.createSession({ cwd: repo });
+    commit(working.worktreePath!, "w.txt", "w\n");
+    await mgr.shipSession(working.id, { message: "w" });
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    faux.setResponses([async () => { await gate; return fauxAssistantMessage("Done."); }]);
+    await mgr.sendMessage(working.id, { requestId: "w1", content: "also" });
+    flag("pr-state", "MERGED");
+    await mgr.checkPullRequests();
+    assert.ok(fs.existsSync(working.worktreePath!));
+    await assert.rejects(mgr.archiveSession(working.id, { force: true }), /还在工作/);
+    release();
+
+    // Closed after its commits were force-pushed away on GitHub: Ship's old head is no backup, so nothing goes.
+    const replaced = await mgr.createSession({ cwd: repo });
+    commit(replaced.worktreePath!, "r.txt", "only here\n");
+    await mgr.shipSession(replaced.id, { message: "r" });
+    git(remote, "update-ref", `refs/heads/${replaced.branch}`, git(remote, "rev-parse", "main"));
+    git(repo, "fetch", "-q", "origin");
+    flag("pr-state", "CLOSED");
+    await mgr.checkPullRequests();
+    assert.ok(fs.existsSync(replaced.worktreePath!));
+    assert.ok(exists(repo, `refs/heads/${replaced.branch}`));
+
+    // Closed while work blocked cleanup, then reopened: it's asked again, and stays.
+    const reopened = await mgr.createSession({ cwd: repo });
+    commit(reopened.worktreePath!, "o.txt", "o\n");
+    await mgr.shipSession(reopened.id, { message: "o" });
+    fs.writeFileSync(path.join(reopened.worktreePath!, "o.txt"), "editing\n");
+    await mgr.checkPullRequests();
+    assert.equal((await mgr.getSessionSummary(reopened.id)).prState, "closed");
+    flag("pr-state", "OPEN");
+    git(reopened.worktreePath!, "checkout", "--", "o.txt");
+    await mgr.checkPullRequests();
+    const after = await mgr.getSessionSummary(reopened.id);
+    assert.deepEqual([after.prState, after.status], ["open", "shipped"]);
+
+    // The daemon shuts down while gh answers "merged": nothing is removed on the way out.
+    flag("pr-state", "MERGED");
+    flag("view-wait", "");
+    const checking = mgr.checkPullRequests();
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    const closing = mgr.close();
+    flag("release", "");
+    await Promise.all([checking, closing]);
+    assert.ok(fs.existsSync(reopened.worktreePath!));
+  } finally {
+    release(); // a failed check mustn't leave close() waiting on the agent
+    for (const name of ["pr-state", "view-wait", "release"]) flag(name);
     await mgr.close();
   }
 });

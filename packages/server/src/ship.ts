@@ -107,12 +107,13 @@ export async function shipState(worktree: SessionWorktree): Promise<ShipState> {
   return { repo, base: prBase, uncommitted, unpushed, ahead };
 }
 
-/** A PR's state on GitHub now. */
-export async function pullRequestState(url: string): Promise<PullRequestInfo["state"]> {
-  const out = await run("gh", os.tmpdir(), ["pr", "view", url, "--json", "state"], 30_000, networkEnv());
-  const state = (JSON.parse(out) as { state?: string }).state?.toLowerCase();
-  if (state !== "open" && state !== "merged" && state !== "closed") throw new Error(`gh pr view printed state ${state}`);
-  return state;
+/** A PR's state on GitHub now, and its head commit (for a merged one: what was merged). */
+export async function pullRequestState(url: string): Promise<{ state: PullRequestInfo["state"]; head?: string }> {
+  const out = await run("gh", os.tmpdir(), ["pr", "view", url, "--json", "state,headRefOid"], 30_000, networkEnv());
+  const pr = JSON.parse(out) as { state?: unknown; headRefOid?: unknown };
+  const state = String(pr.state).toLowerCase();
+  if (state !== "open" && state !== "merged" && state !== "closed") throw new Error(`gh pr view printed state ${String(pr.state)}`);
+  return { state, ...(typeof pr.headRefOid === "string" && /^[0-9a-f]{40}$/.test(pr.headRefOid) ? { head: pr.headRefOid } : {}) };
 }
 
 /** The branch's open PR: a merged or closed one doesn't review what was just pushed. */

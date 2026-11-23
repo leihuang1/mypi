@@ -64,7 +64,7 @@ import { createPiCompatExtension } from "./extensions/pi-compat.js";
 import { changeStats, inspectGitDirectory, noGitStatus } from "./git-service.js";
 import { BadRequestError, ConflictError } from "./errors.js";
 import { pullRequestState, shipState, shipWorktree } from "./ship.js";
-import { createSessionWorktree, removeSessionWorktree, type SessionWorktree, worktreeCwd, worktreeWork } from "./worktree-service.js";
+import { createSessionWorktree, removeSessionWorktree, type SessionWorktree, worktreeCwd } from "./worktree-service.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -134,6 +134,19 @@ const DEFAULT_SYSTEM_INSTRUCTIONS = [
   "Keep responses concise, accurate, and mobile-friendly when inspected from a phone screen.",
 ].join("\n");
 
+function firstLine(err: unknown): string {
+  const stderr = (err as { stderr?: string }).stderr?.trim();
+  return (stderr || (err instanceof Error ? err.message : String(err))).split("\n")[0];
+}
+
+/**
+ * A commit known to be on GitHub, for when the PR's branch is gone: only a merged PR's head (squash or rebase
+ * merges leave its commits on no branch). A closed PR's commits may have been force-pushed away.
+ */
+function shippedHead(meta: CatalogEntry): string | undefined {
+  return meta.pr?.state === "merged" ? meta.pr.head : undefined;
+}
+
 /** A task is running or an input is placed. A queued input with neither is stuck behind a failed run (see status). */
 function running(inspection: HarnessInspection): boolean {
   return inspection.tasks.length > 0 || inspection.submissions.some((s) => s.status === "placed");
@@ -156,13 +169,30 @@ export class HarnessManager {
   /** One environment per session and directory, so their tool processes can be killed on shutdown. */
   private toolEnvs = new Map<string, NodeExecutionEnv>();
   /** Sessions with a Ship in progress: one at a time each. */
-  private shipping = new Set<string>();
-  /** Messages being submitted, per session: Ship waits for them to land, and they for Ship. */
+  /** Ship, Archive or the PR watcher's cleanup, at most one per session: nothing else starts work meanwhile. */
+  private claims = new Map<string, "发布" | "归档" | "清理">();
+  /** Messages being submitted, per session: a claim waits for them to land, and they for the claim. */
   private admitting = new Map<string, number>();
 
-  /** Refuse anything that would start work, or remove the worktree, while Ship is committing and pushing. */
-  private assertNotShipping(sessionId: string, what: string): void {
-    if (this.shipping.has(sessionId)) throw new ConflictError(`正在发布，等它结束再${what}`);
+  /** Claim the session for a lifecycle step; the returned function releases it. */
+  private claim(sessionId: string, what: "发布" | "归档" | "清理"): () => void {
+    const held = this.claims.get(sessionId);
+    if (held) throw new ConflictError(`正在${held}中`);
+    if (this.admitting.has(sessionId)) throw new ConflictError("消息正在发送，稍后再试");
+    this.claims.set(sessionId, what);
+    return () => this.claims.delete(sessionId);
+  }
+
+  /** Refuse anything that would start work, or remove the worktree, while a lifecycle step holds the session. */
+  private assertUnclaimed(sessionId: string, what: string): void {
+    const held = this.claims.get(sessionId);
+    if (held) throw new ConflictError(`正在${held}，等它结束再${what}`);
+  }
+
+  /** Whether the agent is working, for a step that removes things: failing to tell is an error, never "idle". */
+  private async isRunning(meta: CatalogEntry): Promise<boolean> {
+    const managed = await this.openManagedSession(meta);
+    return running(await managed.harness.inspect(BACKGROUND_CONTEXT));
   }
   private prTimer: ReturnType<typeof setInterval> | undefined;
   private checkingPullRequests = false;
@@ -190,7 +220,7 @@ export class HarnessManager {
       async (id) => {
         // Only a worktree holds just the session's own changes.
         const meta = this.catalog.sessions.find((session) => session.id === id);
-        if (!meta?.worktree) return undefined;
+        if (!meta?.worktree || meta.archivedAt) return undefined;
         return changeStats(meta.cwd, meta.worktree.baseRef, meta.worktree.baseCommit);
       },
     );
@@ -632,7 +662,8 @@ export class HarnessManager {
       this.activeSubscribers.add(stopNotifications);
 
       // Resume any unfinished durable tasks from before a crash/restart
-      if (!this.closing) {
+      // An archived session's transcript can be read, but nothing in it runs again.
+      if (!this.closing && !meta.archivedAt) {
         harness.resume();
       }
 
@@ -804,6 +835,7 @@ export class HarnessManager {
         throw new Error(`Session not found: ${sessionId}`);
       }
       assertWritable(meta);
+      this.assertUnclaimed(sessionId, "改设置");
 
       if (req.name && req.name.trim()) {
         meta.name = req.name.trim();
@@ -857,7 +889,7 @@ export class HarnessManager {
       if (idx === -1) {
         throw new Error(`Session not found: ${sessionId}`);
       }
-      this.assertNotShipping(sessionId, "删除");
+      this.assertUnclaimed(sessionId, "删除");
       const [meta] = this.catalog.sessions.splice(idx, 1);
       this.saveCatalog();
 
@@ -881,7 +913,7 @@ export class HarnessManager {
 
       if (meta.worktree) {
         try {
-          const { removed, work } = await removeSessionWorktree(meta.worktree, { pushed: meta.pr?.head });
+          const { removed, work } = await removeSessionWorktree(meta.worktree, { pushed: shippedHead(meta) });
           if (!removed) {
             console.warn(`[mypi-server] Kept ${meta.worktree.path} and ${meta.worktree.branch} of deleted session ${meta.id}: ` +
               `${work.uncommitted} uncommitted path(s), ${work.unpushed} unpushed commit(s)`);
@@ -916,7 +948,7 @@ export class HarnessManager {
         throw new Error(`Session not found: ${sessionId}`);
       }
       assertWritable(meta);
-      this.assertNotShipping(sessionId, "发消息");
+      this.assertUnclaimed(sessionId, "发消息");
       this.admitting.set(sessionId, (this.admitting.get(sessionId) ?? 0) + 1);
       try {
         return await this.admitMessage(meta, req);
@@ -991,7 +1023,7 @@ export class HarnessManager {
       const unfinished = meta.pr?.state !== "open" && state.ahead > 0;
       const nothing = state.uncommitted + state.unpushed === 0 && !unfinished;
       const blocked = meta.archivedAt ? "会话已归档，只能查看"
-        : this.shipping.has(sessionId) ? "正在发布中"
+        : this.claims.has(sessionId) ? `正在${this.claims.get(sessionId)}中`
           : running(inspection) ? "Agent 还在工作，等它结束再发布" : undefined;
       const reason = blocked ?? state.problem ?? (nothing ? (pr ? "已发布，之后没有新的改动" : "还没有可以发布的改动") : undefined);
       return {
@@ -1014,10 +1046,8 @@ export class HarnessManager {
       if (!meta) throw new Error(`Session not found: ${sessionId}`);
       assertWritable(meta);
       if (!meta.worktree) throw new ConflictError("这个会话直接在原目录里工作，没有自己的分支可以发布");
-      if (this.shipping.has(sessionId)) throw new ConflictError("正在发布中");
-      if (this.admitting.has(sessionId)) throw new ConflictError("消息正在发送，稍后再发布");
       if (typeof req.message === "string" && req.message.length > 10_000) throw new BadRequestError("提交说明太长了");
-      this.shipping.add(sessionId);
+      const release = this.claim(sessionId, "发布");
       try {
         const managed = await this.openManagedSession(meta);
         const [inspection, ctxView] = await Promise.all([
@@ -1035,7 +1065,7 @@ export class HarnessManager {
         this.saveCatalog();
         return { pr: result.pr, committed: result.committed, pushed: result.pushed, session: await this.buildSessionSummary(meta) };
       } finally {
-        this.shipping.delete(sessionId);
+        release();
       }
     });
   }
@@ -1049,21 +1079,26 @@ export class HarnessManager {
       const meta = this.catalog.sessions.find((s) => s.id === sessionId);
       if (!meta) throw new Error(`Session not found: ${sessionId}`);
       if (meta.archivedAt) return { archived: true, uncommitted: 0, ignored: 0, unpushed: 0, session: await this.buildSessionSummary(meta) };
-      if (this.shipping.has(sessionId)) throw new ConflictError("正在发布中，等它结束再归档");
-      const summary = await this.buildSessionSummary(meta);
-      if (summary.busy) throw new ConflictError("Agent 还在工作，先停止再归档");
-      let work = { uncommitted: 0, ignored: 0, unpushed: 0 };
-      if (meta.worktree) {
-        const { exists: _, ...found } = await worktreeWork(meta.worktree, meta.pr?.head);
-        work = found;
-        if (!req.force && work.uncommitted + work.ignored + work.unpushed > 0) return { archived: false, ...work, session: summary };
-        const { removed } = await removeSessionWorktree(meta.worktree, { force: true, pushed: meta.pr?.head });
-        if (!removed) console.warn(`[mypi-server] Archived ${meta.id} but kept its locked worktree ${meta.worktree.path}`);
+      const release = this.claim(sessionId, "归档");
+      try {
+        if (await this.isRunning(meta)) throw new ConflictError("Agent 还在工作，先停止再归档");
+        let work = { uncommitted: 0, ignored: 0, unpushed: 0 };
+        if (meta.worktree) {
+          // Only a literal true confirms: the removal itself checks again, so a file written since is never forced.
+          const force = req.force === true;
+          const result = await removeSessionWorktree(meta.worktree, { force, pushed: shippedHead(meta) });
+          const { exists: _, ...found } = result.work;
+          work = found;
+          if (!result.removed && !force) return { archived: false, ...work, session: await this.buildSessionSummary(meta) };
+          if (!result.removed) console.warn(`[mypi-server] Archived ${meta.id} but kept its locked worktree ${meta.worktree.path}`);
+        }
+        meta.archivedAt = Date.now();
+        meta.updatedAt = meta.archivedAt;
+        this.saveCatalog();
+        return { archived: true, ...work, session: await this.buildSessionSummary(meta) };
+      } finally {
+        release();
       }
-      meta.archivedAt = Date.now();
-      meta.updatedAt = meta.archivedAt;
-      this.saveCatalog();
-      return { archived: true, ...work, session: await this.buildSessionSummary(meta) };
     });
   }
 
@@ -1081,33 +1116,43 @@ export class HarnessManager {
     this.checkingPullRequests = true;
     try {
       await this.trackOp(async () => {
-        for (const meta of this.catalog.sessions) {
-          if (!meta.pr || meta.archivedAt || this.shipping.has(meta.id) || this.closing) continue;
-          if (meta.pr.state === "open") {
-            const state = await pullRequestState(meta.pr.url).catch((err) => {
-              console.warn(`[mypi-server] Could not check ${meta.pr?.url}: ${err instanceof Error ? err.message.split("\n")[0] : err}`);
-              return "open" as const;
-            });
-            if (state === "open") continue;
-            meta.pr = { ...meta.pr, state };
-            this.saveCatalog();
-          }
-          // Merged or closed: done with the worktree, unless the agent is still at it or left something new in it.
-          if ((await this.buildSessionSummary(meta)).busy) continue;
-          const result = meta.worktree
-            ? await removeSessionWorktree(meta.worktree, { pushed: meta.pr.head }).catch((err) => {
-              console.error(`[mypi-server] Could not remove the worktree of ${meta.id}:`, err);
+        for (const meta of [...this.catalog.sessions]) {
+          if (this.closing) return;
+          if (!meta.pr || meta.archivedAt || this.claims.has(meta.id)) continue;
+          // Merged is final; a closed PR can be reopened, so it's asked again until its worktree is gone.
+          if (meta.pr.state !== "merged") {
+            const pr = await pullRequestState(meta.pr.url).catch((err) => {
+              console.warn(`[mypi-server] Could not check ${meta.pr?.url}: ${firstLine(err)}`);
               return undefined;
-            })
-            : { removed: true };
-          if (!result?.removed) continue;
-          meta.archivedAt = Date.now();
-          meta.updatedAt = meta.archivedAt;
-          this.saveCatalog();
+            });
+            if (!pr || !meta.pr) continue;
+            if (pr.state !== meta.pr.state) {
+              // What GitHub merged, which may include commits pushed from elsewhere, replaces what Ship pushed.
+              meta.pr = { ...meta.pr, state: pr.state, ...(pr.state === "merged" && pr.head ? { head: pr.head } : {}) };
+              this.saveCatalog();
+            }
+            if (pr.state === "open") continue;
+          }
+          await this.cleanUp(meta).catch((err) => console.warn(`[mypi-server] Kept the worktree of ${meta.id}: ${firstLine(err)}`));
         }
       });
     } finally {
       this.checkingPullRequests = false;
+    }
+  }
+
+  /** After its PR was merged or closed: remove the worktree and archive, unless the agent is at it or left work. */
+  private async cleanUp(meta: CatalogEntry): Promise<void> {
+    const release = this.claim(meta.id, "清理");
+    try {
+      if (this.closing || meta.archivedAt || (await this.isRunning(meta))) return;
+      const result = meta.worktree ? await removeSessionWorktree(meta.worktree, { pushed: shippedHead(meta) }) : { removed: true };
+      if (!result.removed) return;
+      meta.archivedAt = Date.now();
+      meta.updatedAt = meta.archivedAt;
+      this.saveCatalog();
+    } finally {
+      release();
     }
   }
 
@@ -1121,7 +1166,7 @@ export class HarnessManager {
         throw new Error(`Session not found: ${sessionId}`);
       }
       assertWritable(meta);
-      this.assertNotShipping(sessionId, "压缩");
+      this.assertUnclaimed(sessionId, "压缩");
       const managed = await this.openManagedSession(meta);
       const taskId = await managed.root.compact(
         req?.instructions?.trim() || undefined,
@@ -1146,7 +1191,7 @@ export class HarnessManager {
         throw new Error(`Session not found: ${sessionId}`);
       }
       assertWritable(meta);
-      this.assertNotShipping(sessionId, "重置");
+      this.assertUnclaimed(sessionId, "重置");
       const managed = await this.openManagedSession(meta);
       this.notifications.stopSession(sessionId);
       await managed.root.reset(
@@ -1171,6 +1216,7 @@ export class HarnessManager {
       if (!meta) {
         throw new Error(`Session not found: ${sessionId}`);
       }
+      if (meta.archivedAt) return { submissionId, status: "settled" }; // nothing runs in an archived session
       const managed = await this.openManagedSession(meta);
       const status = await managed.harness.abortSubmission(
         submissionId as SubmissionId,
@@ -1192,6 +1238,7 @@ export class HarnessManager {
       if (!meta) {
         throw new Error(`Session not found: ${sessionId}`);
       }
+      if (meta.archivedAt) return { status: "aborted" };
       const managed = await this.openManagedSession(meta);
       this.notifications.stopSession(sessionId);
       await managed.root.abort(BACKGROUND_CONTEXT, { background: true });

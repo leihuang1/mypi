@@ -319,7 +319,11 @@ export function createRequestHandler(options: {
 
         // POST /v1/sessions/:id/archive
         if (req.method === "POST" && subRoute === "archive") {
-          const result = await manager.archiveSession(sessionId, await readJsonBody<ArchiveRequest>(req));
+          const body = await readJsonBody<ArchiveRequest>(req);
+          if (!body || typeof body !== "object" || (body.force !== undefined && typeof body.force !== "boolean")) {
+            throw new BadRequestError("Archive takes { force?: boolean }");
+          }
+          const result = await manager.archiveSession(sessionId, body);
           sendJson(res, 200, result);
           return;
         }
