@@ -1,5 +1,6 @@
 import type { IncomingMessage, ServerResponse } from "node:http";
 import type {
+  ArchiveRequest,
   CompactSessionRequest,
   CreateDirectoryRequest,
   CreateSessionRequest,
@@ -12,7 +13,7 @@ import type {
   UpdateBookmarkRequest,
   UpdateSessionRequest,
 } from "@mypi/shared";
-import { inspectGitDirectory } from "./git-service.js";
+import { inspectGitDirectory, noGitStatus } from "./git-service.js";
 import type { HarnessManager } from "./harness-mgr.js";
 
 function setCorsHeaders(res: ServerResponse): void {
@@ -311,10 +312,18 @@ export function createRequestHandler(options: {
           return;
         }
 
+        // POST /v1/sessions/:id/archive
+        if (req.method === "POST" && subRoute === "archive") {
+          const result = await manager.archiveSession(sessionId, await readJsonBody<ArchiveRequest>(req));
+          sendJson(res, 200, result);
+          return;
+        }
+
         // GET /v1/sessions/:id/git
         if (req.method === "GET" && subRoute === "git") {
           const summary = await manager.getSessionSummary(sessionId);
-          const gitInfo = await inspectGitDirectory(summary.cwd, summary.baseRef);
+          // An archived session's worktree is gone.
+          const gitInfo = summary.archivedAt ? noGitStatus() : await inspectGitDirectory(summary.cwd, summary.baseRef);
           sendJson(res, 200, gitInfo);
           return;
         }

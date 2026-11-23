@@ -135,6 +135,19 @@ export interface ShipResponse {
   session: SessionSummary;
 }
 
+export interface ArchiveRequest {
+  /** Go ahead although the worktree has uncommitted changes (they are discarded) or unpushed commits (they stay on the branch). */
+  force?: boolean;
+}
+
+export interface ArchiveResponse {
+  /** False: nothing happened, because the worktree holds the work below; ask the user, then retry with `force`. */
+  archived: boolean;
+  uncommitted: number;
+  unpushed: number;
+  session: SessionSummary;
+}
+
 /** What the agent asked with `ask_user`. */
 export interface AskedQuestion {
   text: string;
@@ -167,6 +180,8 @@ export interface SessionSummary {
   /** The draft PR Ship opened. */
   prUrl?: string;
   prState?: PullRequestInfo["state"];
+  /** Archived sessions are read-only: their worktree is gone, their transcript stays. */
+  archivedAt?: number;
   entryCount: number;
 }
 

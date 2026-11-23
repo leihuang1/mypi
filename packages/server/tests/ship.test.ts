@@ -29,6 +29,8 @@ before(() => {
     "  echo 'Creating draft pull request'; echo 'https://github.com/owner/repo/pull/7'; exit 0",
     "fi",
     `if [ "$1 $2" = "pr view" ] && [ -f "${root}/pr-exists" ]; then echo '{"url":"https://github.com/owner/repo/pull/3","number":3,"state":"OPEN"}'; exit 0; fi`,
+    // The watcher's question, answered from a file the test writes.
+    `if [ "$1 $2 $4" = "pr view --json" ] && [ "$5" = state ]; then printf '{"state":"%s"}' "$(cat "${root}/pr-state" 2>/dev/null || echo OPEN)"; exit 0; fi`,
     "exit 1",
     "",
   ].join("\n"), { mode: 0o755 });
@@ -185,5 +187,89 @@ it("explains why a session can't ship, over HTTP as a 409", async () => {
     assert.deepEqual(reasons, ["这个会话直接在原目录里工作，没有自己的分支可以发布", "这个仓库没有 origin 远程，无法推送", "origin 不是 github.com 上的仓库，无法创建 PR"]);
   } finally {
     await running.close();
+  }
+});
+
+const exists = (cwd: string, ref: string) => {
+  try {
+    git(cwd, "rev-parse", "--verify", "--quiet", ref);
+    return true;
+  } catch {
+    return false;
+  }
+};
+
+it("archives a session once its PR is merged, even after GitHub deleted its branch, unless it holds new work", async () => {
+  const repo = path.join(root, "repo4");
+  git(root, "clone", "-q", "https://github.com/owner/repo.git", repo);
+  const mgr = manager(path.join(root, "data4"));
+  try {
+    const merged = await mgr.createSession({ cwd: repo });
+    commit(merged.worktreePath!, "g.txt", "g\n");
+    await mgr.shipSession(merged.id, { message: "g" });
+    const busy = await mgr.createSession({ cwd: repo });
+    commit(busy.worktreePath!, "h.txt", "h\n");
+    await mgr.shipSession(busy.id, { message: "h" });
+    fs.writeFileSync(path.join(busy.worktreePath!, "h.txt"), "more\n");
+
+    // Squash-merged on GitHub, which then deleted the branch; a later fetch pruned it here.
+    git(remote, "update-ref", "-d", `refs/heads/${merged.branch}`);
+    git(repo, "fetch", "-q", "--prune", "origin");
+    assert.equal(exists(repo, `refs/remotes/origin/${merged.branch}`), false);
+    fs.writeFileSync(path.join(root, "pr-state"), "MERGED");
+    await mgr.checkPullRequests();
+
+    const after = await mgr.getSessionSummary(merged.id);
+    assert.deepEqual([after.status, after.prState], ["archived", "merged"]);
+    assert.equal(fs.existsSync(merged.worktreePath!), false);
+    assert.equal(exists(repo, `refs/heads/${merged.branch}`), false);
+    assert.ok(ghCalls().includes(`pr view ${after.prUrl} --json state`));
+
+    const kept = await mgr.getSessionSummary(busy.id);
+    assert.deepEqual([kept.status, kept.prState], ["done", "merged"], "new uncommitted work keeps it");
+    assert.ok(fs.existsSync(busy.worktreePath!));
+    git(busy.worktreePath!, "checkout", "--", "h.txt");
+    await mgr.checkPullRequests();
+    assert.equal((await mgr.getSessionSummary(busy.id)).status, "archived");
+    assert.equal(fs.existsSync(busy.worktreePath!), false);
+  } finally {
+    fs.rmSync(path.join(root, "pr-state"));
+    await mgr.close();
+  }
+});
+
+it("archives on request: warns about work first, keeps unpushed commits on the branch, then is read-only", async () => {
+  const repo = path.join(root, "repo5");
+  git(root, "clone", "-q", "https://github.com/owner/repo.git", repo);
+  const mgr = manager(path.join(root, "data5"));
+  try {
+    const session = await mgr.createSession({ cwd: repo });
+    const wt = session.worktreePath!;
+    commit(wt, "i.txt", "i\n");
+    fs.writeFileSync(path.join(wt, "j.txt"), "j\n");
+    const warned = await mgr.archiveSession(session.id, {});
+    assert.deepEqual([warned.archived, warned.uncommitted, warned.unpushed, warned.session.status], [false, 1, 1, "idle"]);
+    assert.ok(fs.existsSync(wt));
+
+    const archived = await mgr.archiveSession(session.id, { force: true });
+    assert.deepEqual([archived.archived, archived.session.status], [true, "archived"]);
+    assert.ok(archived.session.archivedAt);
+    assert.equal(fs.existsSync(wt), false);
+    assert.ok(exists(repo, `refs/heads/${session.branch}`), "the unpushed commit stays on its branch");
+    assert.equal(git(repo, "log", "-1", "--format=%s", session.branch!), "edit i.txt");
+
+    const readOnly = (err: Error & { status?: number }) => err.status === 409 && /已归档/.test(err.message);
+    await assert.rejects(mgr.sendMessage(session.id, { requestId: "r", content: "more" }), readOnly);
+    await assert.rejects(mgr.shipSession(session.id, {}), readOnly);
+    await assert.rejects(mgr.updateSession(session.id, { name: "x" }), readOnly);
+    await assert.rejects(mgr.compactSession(session.id), readOnly);
+    await assert.rejects(mgr.resetSession(session.id), readOnly);
+    assert.equal((await mgr.archiveSession(session.id, {})).archived, true, "archiving again is a no-op");
+
+    const clean = await mgr.createSession({ cwd: repo });
+    assert.equal((await mgr.archiveSession(clean.id, {})).archived, true);
+    assert.equal(exists(repo, `refs/heads/${clean.branch}`), false, "nothing on it: the branch goes too");
+  } finally {
+    await mgr.close();
   }
 });

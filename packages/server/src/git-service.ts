@@ -85,9 +85,8 @@ function parseNumstat(output: string): Map<string, { additions: number; deletion
   return stats;
 }
 
-/** Changes in `cwd`'s work tree: against HEAD, or with `baseRef`, against its merge-base, so local commits show too. */
-export async function inspectGitDirectory(cwd: string, baseRef?: string): Promise<GitStatusResponse> {
-  const result: GitStatusResponse = {
+export function noGitStatus(): GitStatusResponse {
+  return {
     isGitRepo: false,
     clean: true,
     summary: { modified: 0, added: 0, deleted: 0, untracked: 0, totalAdditions: 0, totalDeletions: 0 },
@@ -95,6 +94,11 @@ export async function inspectGitDirectory(cwd: string, baseRef?: string): Promis
     fullDiff: "",
     updatedAt: Date.now(),
   };
+}
+
+/** Changes in `cwd`'s work tree: against HEAD, or with `baseRef`, against its merge-base, so local commits show too. */
+export async function inspectGitDirectory(cwd: string, baseRef?: string): Promise<GitStatusResponse> {
+  const result = noGitStatus();
   let repoRoot: string;
   try {
     // Remove only the output delimiter, not whitespace belonging to the directory.

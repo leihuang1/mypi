@@ -121,6 +121,7 @@ export async function startMyPiServer(options?: {
   });
 
   await manager.resumeSessions();
+  manager.watchPullRequests();
 
   const activeResponses = new Set<import("node:http").ServerResponse>();
   const inFlightRequests = new Set<Promise<void>>();

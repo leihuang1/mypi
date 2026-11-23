@@ -19,6 +19,8 @@ import { openNodeSqliteStorage } from "@earendil-works/pi-durable/storage/sqlite
 import { CodingTools } from "@earendil-works/pi-durable/tools";
 import type {
   AbortSubmissionResponse,
+  ArchiveRequest,
+  ArchiveResponse,
   CompactSessionRequest,
   CompactSessionResponse,
   CreateDirectoryRequest,
@@ -58,8 +60,9 @@ import { AskUserExtension, conversationState, lastReply } from "./extensions/ask
 import { agentShellEnv, GuardExtension } from "./extensions/guard.js";
 import { createPiCompatExtension } from "./extensions/pi-compat.js";
 import { inspectGitDirectory } from "./git-service.js";
-import { ShipError, shipState, shipWorktree } from "./ship.js";
-import { createSessionWorktree, removeSessionWorktree, type SessionWorktree, worktreeCwd } from "./worktree-service.js";
+import { ConflictError } from "./errors.js";
+import { pullRequestState, shipState, shipWorktree } from "./ship.js";
+import { createSessionWorktree, removeSessionWorktree, type SessionWorktree, worktreeCwd, worktreeWork } from "./worktree-service.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -73,8 +76,10 @@ interface CatalogEntry {
   ponytail?: boolean;
   /** Set when the session works in its own worktree; `cwd` is inside it. */
   worktree?: SessionWorktree;
-  /** The draft PR Ship opened, and when it last shipped. */
-  pr?: PullRequestInfo & { shippedAt: number };
+  /** The draft PR Ship opened; when it last shipped, and the commit it pushed. */
+  pr?: PullRequestInfo & { shippedAt: number; head?: string };
+  /** Archived by the user, or after the PR was merged or closed. Read-only from then on. */
+  archivedAt?: number;
   /** When the user last sent a message: work after the last Ship means the session isn't "shipped" any more. */
   lastInputAt?: number;
   createdAt: number;
@@ -105,7 +110,12 @@ function worktreeFields(meta: CatalogEntry): Pick<SessionSummary, "branch" | "wo
   return {
     ...(wt ? { branch: wt.branch, worktreePath: wt.path, baseRef: wt.baseRef, repoPath: wt.repoPath } : {}),
     ...(meta.pr ? { prUrl: meta.pr.url, prState: meta.pr.state } : {}),
+    ...(meta.archivedAt ? { archivedAt: meta.archivedAt } : {}),
   };
+}
+
+function assertWritable(meta: CatalogEntry): void {
+  if (meta.archivedAt) throw new ConflictError("会话已归档，只能查看");
 }
 
 /** The commit message and PR title Ship suggests: the first line of the agent's last reply. */
@@ -140,6 +150,8 @@ export class HarnessManager {
   private toolEnvs = new Map<string, NodeExecutionEnv>();
   /** Sessions with a Ship in progress: one at a time each. */
   private shipping = new Set<string>();
+  private prTimer: ReturnType<typeof setInterval> | undefined;
+  private checkingPullRequests = false;
   private closing = false;
   private closePromise: Promise<void> | null = null;
 
@@ -665,10 +677,11 @@ export class HarnessManager {
           (s) => s.status === "queued" || s.status === "placed",
         );
       const conversation = conversationState(ctxView.entries as unknown as RawEntryRecord[]);
-      const status: SessionStatus = busy ? "running"
-        : conversation.question || conversation.failed ? "needs_you"
-          : meta.pr && (meta.lastInputAt ?? 0) <= meta.pr.shippedAt ? "shipped"
-            : conversation.started ? "done" : "idle";
+      const status: SessionStatus = meta.archivedAt ? "archived"
+        : busy ? "running"
+          : conversation.question || conversation.failed ? "needs_you"
+            : meta.pr?.state === "open" && (meta.lastInputAt ?? 0) <= meta.pr.shippedAt ? "shipped"
+              : conversation.started || meta.pr ? "done" : "idle";
 
       return {
         id: meta.id,
@@ -772,6 +785,7 @@ export class HarnessManager {
       if (!meta) {
         throw new Error(`Session not found: ${sessionId}`);
       }
+      assertWritable(meta);
 
       if (req.name && req.name.trim()) {
         meta.name = req.name.trim();
@@ -847,7 +861,7 @@ export class HarnessManager {
 
       if (meta.worktree) {
         try {
-          const { removed, work } = await removeSessionWorktree(meta.worktree);
+          const { removed, work } = await removeSessionWorktree(meta.worktree, { pushed: meta.pr?.head });
           if (!removed) {
             console.warn(`[mypi-server] Kept ${meta.worktree.path} and ${meta.worktree.branch} of deleted session ${meta.id}: ` +
               `${work.uncommitted} uncommitted path(s), ${work.unpushed} unpushed commit(s)`);
@@ -881,6 +895,7 @@ export class HarnessManager {
       if (!meta) {
         throw new Error(`Session not found: ${sessionId}`);
       }
+      assertWritable(meta);
       const managed = await this.openManagedSession(meta);
 
       // Ensure session name auto-updates on first prompt if still generic
@@ -947,8 +962,9 @@ export class HarnessManager {
     return this.trackOp(async () => {
       const meta = this.catalog.sessions.find((s) => s.id === sessionId);
       if (!meta) throw new Error(`Session not found: ${sessionId}`);
-      if (!meta.worktree) throw new ShipError("这个会话直接在原目录里工作，没有自己的分支可以发布");
-      if (this.shipping.has(sessionId)) throw new ShipError("正在发布中");
+      assertWritable(meta);
+      if (!meta.worktree) throw new ConflictError("这个会话直接在原目录里工作，没有自己的分支可以发布");
+      if (this.shipping.has(sessionId)) throw new ConflictError("正在发布中");
       this.shipping.add(sessionId);
       try {
         const managed = await this.openManagedSession(meta);
@@ -957,14 +973,14 @@ export class HarnessManager {
           managed.root.context(BACKGROUND_CONTEXT),
         ]);
         if (inspection.tasks.length > 0 || inspection.submissions.some((s) => s.status === "queued" || s.status === "placed")) {
-          throw new ShipError("Agent 还在工作，等它结束再发布");
+          throw new ConflictError("Agent 还在工作，等它结束再发布");
         }
         const reply = lastReply(ctxView.entries as unknown as RawEntryRecord[]);
         const message = req.message?.trim() || suggestedMessage(meta, reply);
         const body = [reply?.slice(0, 4000), `_Shipped by MyPi from session “${meta.name}”._`].filter(Boolean).join("\n\n");
         const existing = meta.pr?.state === "open" ? { url: meta.pr.url, number: meta.pr.number, state: meta.pr.state } : undefined;
         const result = await shipWorktree(meta.worktree, { message, body, existing });
-        meta.pr = { ...result.pr, shippedAt: Date.now() };
+        meta.pr = { ...result.pr, shippedAt: Date.now(), head: result.head };
         meta.updatedAt = meta.pr.shippedAt;
         this.saveCatalog();
         return { pr: result.pr, committed: result.committed, pushed: result.pushed, session: await this.buildSessionSummary(meta) };
@@ -972,6 +988,75 @@ export class HarnessManager {
         this.shipping.delete(sessionId);
       }
     });
+  }
+
+  /**
+   * Make the session read-only and remove its worktree. Without `force`, a worktree that still holds uncommitted or
+   * unpushed work stays, and the response says what's there. Unpushed commits always stay on the branch.
+   */
+  async archiveSession(sessionId: string, req: ArchiveRequest): Promise<ArchiveResponse> {
+    return this.trackOp(async () => {
+      const meta = this.catalog.sessions.find((s) => s.id === sessionId);
+      if (!meta) throw new Error(`Session not found: ${sessionId}`);
+      if (meta.archivedAt) return { archived: true, uncommitted: 0, unpushed: 0, session: await this.buildSessionSummary(meta) };
+      if (this.shipping.has(sessionId)) throw new ConflictError("正在发布中，等它结束再归档");
+      const summary = await this.buildSessionSummary(meta);
+      if (summary.busy) throw new ConflictError("Agent 还在工作，先停止再归档");
+      let work = { uncommitted: 0, unpushed: 0 };
+      if (meta.worktree) {
+        work = await worktreeWork(meta.worktree, meta.pr?.head);
+        if (!req.force && work.uncommitted + work.unpushed > 0) return { archived: false, ...work, session: summary };
+        await removeSessionWorktree(meta.worktree, { force: true, pushed: meta.pr?.head });
+      }
+      meta.archivedAt = Date.now();
+      meta.updatedAt = meta.archivedAt;
+      this.saveCatalog();
+      return { archived: true, ...work, session: await this.buildSessionSummary(meta) };
+    });
+  }
+
+  /** Poll open PRs every `intervalMs`; when one is merged or closed, clean up and archive its session. */
+  watchPullRequests(intervalMs = 5 * 60_000): void {
+    clearInterval(this.prTimer);
+    this.prTimer = setInterval(() => {
+      this.checkPullRequests().catch((err) => console.error("[mypi-server] PR check failed:", err));
+    }, intervalMs);
+    this.prTimer.unref();
+  }
+
+  async checkPullRequests(): Promise<void> {
+    if (this.checkingPullRequests || this.closing) return;
+    this.checkingPullRequests = true;
+    try {
+      await this.trackOp(async () => {
+        for (const meta of this.catalog.sessions) {
+          if (!meta.pr || meta.archivedAt || this.shipping.has(meta.id) || this.closing) continue;
+          if (meta.pr.state === "open") {
+            const state = await pullRequestState(meta.pr.url).catch((err) => {
+              console.warn(`[mypi-server] Could not check ${meta.pr?.url}: ${err instanceof Error ? err.message.split("\n")[0] : err}`);
+              return "open" as const;
+            });
+            if (state === "open") continue;
+            meta.pr = { ...meta.pr, state };
+            this.saveCatalog();
+          }
+          // Merged or closed: done with the worktree, unless the agent is still at it or left something new in it.
+          if ((await this.buildSessionSummary(meta)).busy) continue;
+          const result = meta.worktree
+            ? await removeSessionWorktree(meta.worktree, { pushed: meta.pr.head }).catch((err) => {
+              console.error(`[mypi-server] Could not remove the worktree of ${meta.id}:`, err);
+              return undefined;
+            })
+            : { removed: true };
+          if (!result?.removed) continue;
+          meta.archivedAt = Date.now();
+          meta.updatedAt = meta.archivedAt;
+          this.saveCatalog();
+        }
+      });
+    } finally {
+      this.checkingPullRequests = false;
+    }
   }
 
   async compactSession(
@@ -983,6 +1068,7 @@ export class HarnessManager {
       if (!meta) {
         throw new Error(`Session not found: ${sessionId}`);
       }
+      assertWritable(meta);
       const managed = await this.openManagedSession(meta);
       const taskId = await managed.root.compact(
         req?.instructions?.trim() || undefined,
@@ -1006,6 +1092,7 @@ export class HarnessManager {
       if (!meta) {
         throw new Error(`Session not found: ${sessionId}`);
       }
+      assertWritable(meta);
       const managed = await this.openManagedSession(meta);
       this.notifications.stopSession(sessionId);
       await managed.root.reset(
@@ -1282,6 +1369,7 @@ export class HarnessManager {
   async close(): Promise<void> {
     if (this.closePromise) return this.closePromise;
     this.closing = true;
+    clearInterval(this.prTimer);
     this.closePromise = (async () => {
       await this.notifications.close();
       while (

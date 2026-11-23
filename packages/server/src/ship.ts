@@ -1,7 +1,9 @@
 import { execFile } from "node:child_process";
 import fs from "node:fs";
+import os from "node:os";
 import { promisify } from "node:util";
 import type { PullRequestInfo } from "@mypi/shared";
+import { ConflictError } from "./errors.js";
 import { type SessionWorktree, worktreeWork } from "./worktree-service.js";
 
 const execFileAsync = promisify(execFile);
@@ -9,11 +11,6 @@ const execFileAsync = promisify(execFile);
 // The daemon's own credentials, and nothing may wait for a terminal or print colour codes. Built per call, not at
 // import, so it is the environment the daemon has now.
 const networkEnv = () => ({ ...process.env, GIT_TERMINAL_PROMPT: "0", GCM_INTERACTIVE: "never", GH_PROMPT_DISABLED: "1", NO_COLOR: "1" });
-
-/** A refusal the user can act on: HTTP 409 rather than 500. */
-export class ShipError extends Error {
-  readonly status = 409;
-}
 
 async function run(command: string, cwd: string, args: string[], timeout = 15_000, env?: NodeJS.ProcessEnv): Promise<string> {
   const { stdout } = await execFileAsync(command, args, { cwd, env: env ?? process.env, timeout, maxBuffer: 4 * 1024 * 1024 });
@@ -59,6 +56,14 @@ export async function shipState(worktree: SessionWorktree): Promise<ShipState> {
   return { repo, base, uncommitted, unpushed };
 }
 
+/** A PR's state on GitHub now. */
+export async function pullRequestState(url: string): Promise<PullRequestInfo["state"]> {
+  const out = await run("gh", os.tmpdir(), ["pr", "view", url, "--json", "state"], 30_000, networkEnv());
+  const state = (JSON.parse(out) as { state?: string }).state?.toLowerCase();
+  if (state !== "open" && state !== "merged" && state !== "closed") throw new Error(`gh pr view printed state ${state}`);
+  return state;
+}
+
 async function findPullRequest(cwd: string, repo: string, branch: string): Promise<PullRequestInfo | undefined> {
   const out = await run("gh", cwd, ["pr", "view", branch, "--repo", repo, "--json", "url,number,state"], 30_000, networkEnv()).catch(() => "");
   if (!out) return undefined;
@@ -75,7 +80,7 @@ export async function shipWorktree(
   options: { message: string; body: string; existing?: PullRequestInfo },
 ): Promise<{ pr: PullRequestInfo; committed: boolean; pushed: boolean; head: string }> {
   const state = await shipState(worktree);
-  if (state.problem) throw new ShipError(state.problem);
+  if (state.problem) throw new ConflictError(state.problem);
   const { repo, base } = state as Required<ShipState>;
   const branch = worktree.branch;
   const cwd = worktree.path;
@@ -90,7 +95,7 @@ export async function shipWorktree(
   const head = await run("git", cwd, ["rev-parse", "HEAD"]);
   const { unpushed } = await worktreeWork(worktree);
   const published = await run("git", cwd, ["rev-parse", "--verify", "--quiet", `refs/remotes/origin/${branch}`]).catch(() => "");
-  if (unpushed === 0 && !published && !options.existing) throw new ShipError("没有可以发布的改动");
+  if (unpushed === 0 && !published && !options.existing) throw new ConflictError("没有可以发布的改动");
 
   let pushed = false;
   if (unpushed > 0) {
@@ -100,7 +105,7 @@ export async function shipWorktree(
     } catch (err) {
       const rejected = /\[rejected\]|non-fast-forward|fetch first/.test(String((err as { stderr?: string }).stderr));
       throw rejected
-        ? new ShipError(`GitHub 上的 ${branch} 有本地没有的提交，Ship 不会强推：先把它们合进来再发布`)
+        ? new ConflictError(`GitHub 上的 ${branch} 有本地没有的提交，Ship 不会强推：先把它们合进来再发布`)
         : new Error(`git push failed: ${firstLine(err)}`);
     }
     pushed = true;

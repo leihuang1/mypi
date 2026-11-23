@@ -16,6 +16,8 @@ import type {
   ResetSessionResponse,
   SendMessageRequest,
   SendMessageResponse,
+  ArchiveRequest,
+  ArchiveResponse,
   SessionSummary,
   ShipPreview,
   ShipRequest,
@@ -344,6 +346,13 @@ export class MyPiClient {
 
   async shipSession(sessionId: string, req: ShipRequest = {}): Promise<ShipResponse> {
     return this.request<ShipResponse>(`/v1/sessions/${encodeURIComponent(sessionId)}/ship`, {
+      method: "POST",
+      body: JSON.stringify(req),
+    });
+  }
+
+  async archiveSession(sessionId: string, req: ArchiveRequest = {}): Promise<ArchiveResponse> {
+    return this.request<ArchiveResponse>(`/v1/sessions/${encodeURIComponent(sessionId)}/archive`, {
       method: "POST",
       body: JSON.stringify(req),
     });

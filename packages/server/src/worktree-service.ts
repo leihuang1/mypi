@@ -108,14 +108,16 @@ export function worktreeCwd(worktree: SessionWorktree): string {
   return fs.existsSync(dir) ? dir : worktree.path;
 }
 
-export async function worktreeWork(worktree: SessionWorktree): Promise<WorktreeWork> {
+/** `pushed`: a commit known to be on GitHub (the one Ship pushed), for when its remote branch is gone. */
+export async function worktreeWork(worktree: SessionWorktree, pushed?: string): Promise<WorktreeWork> {
   const exists = fs.existsSync(worktree.path);
   const status = exists ? await git(worktree.path, ["status", "--porcelain=v1", "-z", "--no-renames", "--untracked-files=normal"]) : "";
   // The branch's commits, and HEAD's in case the agent switched branches, that no remote branch or the base has.
   const tips = [`refs/heads/${worktree.branch}`, ...(exists ? ["HEAD"] : [])];
   const present: string[] = [];
   for (const tip of tips) if (await hasRef(exists ? worktree.path : worktree.repoPath, tip)) present.push(tip);
-  const base = (await hasRef(worktree.repoPath, worktree.baseRef)) ? [worktree.baseRef] : [];
+  const base: string[] = [];
+  for (const ref of [worktree.baseRef, pushed]) if (ref && (await hasRef(worktree.repoPath, ref))) base.push(ref);
   const unpushed = present.length === 0 ? "0"
     : await git(exists ? worktree.path : worktree.repoPath, ["rev-list", "--count", ...present, "--not", "--remotes", ...base]);
   return {
@@ -127,14 +129,19 @@ export async function worktreeWork(worktree: SessionWorktree): Promise<WorktreeW
 
 /**
  * Remove the worktree and its branch when they hold nothing that exists elsewhere; otherwise leave both, so work is
- * never lost. Throws, removing nothing, when that can't be checked.
+ * never lost. `force` (an Archive the user confirmed) removes the worktree with its uncommitted changes, but still
+ * keeps a branch with unpushed commits. Throws, removing nothing, when that can't be checked.
  */
-export async function removeSessionWorktree(worktree: SessionWorktree): Promise<{ removed: boolean; work: WorktreeWork }> {
-  const work = await worktreeWork(worktree);
-  if (work.uncommitted > 0 || work.unpushed > 0) return { removed: false, work };
-  if (work.exists) await git(worktree.repoPath, ["worktree", "remove", worktree.path]);
+export async function removeSessionWorktree(
+  worktree: SessionWorktree,
+  options: { force?: boolean; pushed?: string } = {},
+): Promise<{ removed: boolean; branchDeleted: boolean; work: WorktreeWork }> {
+  const work = await worktreeWork(worktree, options.pushed);
+  if (!options.force && (work.uncommitted > 0 || work.unpushed > 0)) return { removed: false, branchDeleted: false, work };
+  if (work.exists) await git(worktree.repoPath, ["worktree", "remove", ...(options.force ? ["--force"] : []), worktree.path]);
   else await git(worktree.repoPath, ["worktree", "prune"]);
+  if (work.unpushed > 0) return { removed: true, branchDeleted: false, work };
   // -D: a squash- or rebase-merged branch is not an ancestor of anything, yet nothing on it is unpushed.
   await git(worktree.repoPath, ["branch", "-D", worktree.branch]).catch(() => "");
-  return { removed: true, work };
+  return { removed: true, branchDeleted: true, work };
 }
