@@ -259,6 +259,9 @@ export function SessionDetailScreen({
   sessionRef.current = session;
   const summaryGenRef = useRef(0);
   const lastSummaryAtRef = useRef(0);
+  // The question answered here, and the summary's updatedAt when it was shown: a summary no newer than that (a
+  // snapshot or read from before the daemon took the answer) mustn't bring its chips back.
+  const answeredRef = useRef<{ text: string; updatedAt: number } | null>(null);
 
   // Quick @-mention inline directory browser state
   const [quickBrowsePath, setQuickBrowsePath] = useState<string>(session.cwd);
@@ -289,11 +292,21 @@ export function SessionDetailScreen({
     if (mountedRef.current && currentSessionIdRef.current === targetSessionId) setControlBusy(false);
   };
 
-  /** Apply a summary from the daemon, unless it's older than one already shown (a slow read, a late snapshot). */
-  const applySummary = (updated: SessionSummary) => {
-    if (updated.id !== sessionRef.current.id || updated.updatedAt < sessionRef.current.updatedAt) return;
+  /**
+   * Apply a summary from the daemon, unless it's older than one already applied (a slow read, a late snapshot).
+   * Returns what was applied: an answered question is taken out, and the summary then says running.
+   */
+  const applySummary = (incoming: SessionSummary): SessionSummary | undefined => {
+    if (incoming.id !== sessionRef.current.id || incoming.updatedAt < sessionRef.current.updatedAt) return undefined;
+    const answered = answeredRef.current;
+    const updated = answered && incoming.question?.text === answered.text && incoming.updatedAt <= answered.updatedAt
+      ? { ...incoming, status: "running" as const, question: undefined }
+      : incoming;
+    // Now, not at the next render: a second summary in the same batch is compared with this one.
+    sessionRef.current = updated;
     lastSummaryAtRef.current = Date.now();
     onSessionUpdated?.(updated);
+    return updated;
   };
   /** A change made here (Ship, Archive, a message): reads started before it are out of date. */
   const appliedLocally = (updated: SessionSummary) => {
@@ -306,12 +319,17 @@ export function SessionDetailScreen({
   const refreshSummary = (attempt = 0) => {
     const targetSessionId = session.id;
     const gen = summaryGenRef.current;
+    const current = () => mountedRef.current && currentSessionIdRef.current === targetSessionId;
+    const again = () => setTimeout(() => refreshSummary(attempt + 1), 1000 * (attempt + 1));
     lastSummaryAtRef.current = Date.now();
     client.getSession(targetSessionId).then((updated) => {
-      if (!mountedRef.current || currentSessionIdRef.current !== targetSessionId || gen !== summaryGenRef.current) return;
-      applySummary(updated);
-      if (updated.status === "running" && attempt < 4) setTimeout(() => refreshSummary(attempt + 1), 1000 * (attempt + 1));
-    }).catch(() => {});
+      if (!current() || gen !== summaryGenRef.current) return;
+      if (applySummary(updated)?.status === "running" && attempt < 4) again();
+    }).catch((err) => {
+      if (!current()) return;
+      if (attempt < 4) again();
+      else setConnError(`读不到会话的最新状态：${err instanceof Error ? err.message : String(err)}`);
+    });
   };
 
   // An archive (the PR watcher's too) closes the Ship sheet: nothing in it can run any more.
@@ -331,9 +349,8 @@ export function SessionDetailScreen({
       onFrame: (frame) => {
         if (frame.type === "snapshot") {
           setSnapshotReady(true);
-          applySummary(frame.session);
           // Captured before the stream: it may still say running about a run that has ended.
-          if (frame.session.status === "running") setTimeout(() => refreshSummary(), 800);
+          if (applySummary(frame.session)?.status === "running") setTimeout(() => refreshSummary(), 800);
         }
         if (frame.type === "events" && frame.events.some((event) => event.type === "run_end")) setTimeout(() => refreshSummary(), 800);
         // The PR watcher changes a session without a run: look again now and then while its PR is open.
@@ -457,6 +474,8 @@ export function SessionDetailScreen({
 
   const submitMessage = async (request: SendMessageRequest) => {
     const targetSessionId = session.id;
+    const shown = sessionRef.current;
+    const answered = shown.question ? { question: shown.question, updatedAt: shown.updatedAt } : undefined;
     setSending(true);
     const pending = { ...request, error: "发送结果尚未确认" };
     saveSessionView(viewKey, { failedDraft: pending });
@@ -469,10 +488,10 @@ export function SessionDetailScreen({
       await client.sendMessage(targetSessionId, request);
       if (getSessionView(viewKey).failedDraft !== pending) return;
       saveSessionView(viewKey, { failedDraft: null });
-      // Answered: the question goes until a newer summary says otherwise.
-      if (currentSessionIdRef.current === targetSessionId && sessionRef.current.question) {
-        summaryGenRef.current++;
-        onSessionUpdated?.({ ...sessionRef.current, status: "running", question: undefined });
+      // Answered: that question goes, unless a newer summary came meanwhile (the agent may have asked the next one).
+      if (answered && mountedRef.current && currentSessionIdRef.current === targetSessionId) {
+        answeredRef.current = { text: answered.question.text, updatedAt: answered.updatedAt };
+        if (sessionRef.current.question?.text === answered.question.text) applySummary(sessionRef.current);
       }
       if (mountedRef.current && currentSessionIdRef.current === targetSessionId) {
         setFailedDraft(null);
@@ -629,6 +648,7 @@ export function SessionDetailScreen({
 
   const openShip = async () => {
     if (topSheet === "ship") {
+      previewGenRef.current++; // its pending preview is no longer wanted
       setTopSheet(null);
       return;
     }
@@ -645,7 +665,7 @@ export function SessionDetailScreen({
       }
     } catch (err) {
       if (current()) {
-        setTopSheet(null);
+        setTopSheet((sheet) => (sheet === "ship" ? null : sheet));
         setConnError(err instanceof Error ? err.message : String(err));
       }
     }

@@ -20,8 +20,11 @@ function screen(client: Record<string, unknown>, session: Record<string, unknown
     topSheet: null, controlBusy: false, shipPreview: null, shipMessage: "", sending: false, failedDraft: null, error: null,
     mountedRef: { current: true }, currentSessionIdRef: { current: "s1" }, isNearBottomRef: { current: false },
     controlBusyRef: { current: false }, previewGenRef: { current: 0 }, sessionRef: { current: session },
-    summaryGenRef: { current: 0 }, lastSummaryAtRef: { current: 0 }, viewKey: "v",
-    onSessionUpdated: (summary: any) => { updates.push(summary); state.session = summary; state.sessionRef.current = summary; },
+    summaryGenRef: { current: 0 }, lastSummaryAtRef: { current: 0 }, answeredRef: { current: null }, viewKey: "v",
+    // The parent: it rerenders the screen later, so it doesn't touch the screen's refs.
+    onSessionUpdated: (summary: any) => { updates.push(summary); state.session = summary; },
+    timers: [] as (() => void)[],
+    setTimeout: (fn: () => void) => { state.timers.push(fn); return 0; },
     Alert: { alert: (title: string, message: string, buttons: Button[]) => alerts.push({ title, message, buttons }) },
     Linking: { openURL: async (url: string) => { opened.push(url); } },
     saveSessionView: (key: string, patch: object) => { views[key] = { ...views[key], ...patch }; },
@@ -36,7 +39,7 @@ function screen(client: Record<string, unknown>, session: Record<string, unknown
   state.setConnError = (value: unknown) => { state.error = value; };
   const handlers = loadScreenHandlers(
     new URL("../src/screens/SessionDetailScreen.tsx", import.meta.url),
-    ["claimControl", "releaseControl", "applySummary", "appliedLocally", "openPr", "submitMessage",
+    ["claimControl", "releaseControl", "applySummary", "appliedLocally", "refreshSummary", "openPr", "submitMessage",
       "openShip", "handleShip", "handleArchive", "handleAnswer"],
     state,
   );
@@ -159,4 +162,66 @@ it("closes the Ship sheet when its preview can't be read", async () => {
   await state.openShip();
   assert.equal(state.topSheet, null);
   assert.match(String(state.error), /会话已归档，只能查看/);
+});
+
+it("keeps an answered question gone and a newer one shown, in whatever order summaries arrive", async () => {
+  const asked = { id: "s1", updatedAt: 1, status: "needs_you", question: { text: "Tabs?", choices: ["tabs"] } };
+
+  // The agent asked the next question before the answer's response arrived: that question stays.
+  let ack!: () => void;
+  const late = screen({ sendMessage: () => new Promise<void>((resolve) => { ack = resolve; }) }, asked);
+  const answering = late.state.handleAnswer("tabs");
+  await tick();
+  late.state.applySummary({ id: "s1", updatedAt: 2, status: "needs_you", question: { text: "Deploy now?" } });
+  ack();
+  await answering;
+  assert.equal(late.updates.at(-1).question?.text, "Deploy now?");
+
+  // A snapshot from before the answer arrives after it: its question isn't brought back.
+  const { state, updates } = screen({}, asked);
+  await state.handleAnswer("tabs");
+  assert.equal(updates.at(-1).question, undefined);
+  assert.deepEqual(plain(state.applySummary({ ...asked })), { id: "s1", updatedAt: 1, status: "running" });
+  assert.equal(updates.at(-1).question, undefined);
+
+  // Two summaries before a rerender: the older second one is dropped.
+  state.applySummary({ id: "s1", updatedAt: 3, name: "New" });
+  assert.equal(state.applySummary({ id: "s1", updatedAt: 2, name: "Old" }), undefined);
+  assert.equal(updates.at(-1).name, "New");
+});
+
+it("reads the summary again when a read fails, and says so when it keeps failing", async () => {
+  let fail = 1;
+  const { state, updates } = screen({
+    getSession: async () => {
+      if (fail-- > 0) throw new Error("503");
+      return { id: "s1", updatedAt: 2, status: "needs_you", question: { text: "Port?" } };
+    },
+  });
+  state.refreshSummary();
+  await tick();
+  assert.equal(state.timers.length, 1, "a retry is scheduled");
+  state.timers.shift()!();
+  await tick();
+  assert.equal(updates.at(-1).question.text, "Port?");
+
+  fail = 99;
+  state.refreshSummary();
+  for (let i = 0; i < 4; i++) {
+    await tick();
+    state.timers.shift()!();
+  }
+  await tick();
+  assert.match(String(state.error), /读不到会话的最新状态/);
+});
+
+it("ignores the preview of a Ship sheet that was closed", async () => {
+  const pending = deferred<ShipPreview>();
+  const { state } = screen({ getShipPreview: () => pending.promise });
+  const opening = state.openShip();
+  await state.openShip(); // closes it
+  state.topSheet = "rename";
+  pending.reject(new Error("timeout"));
+  await opening;
+  assert.deepEqual([state.topSheet, state.error], ["rename", null]);
 });
