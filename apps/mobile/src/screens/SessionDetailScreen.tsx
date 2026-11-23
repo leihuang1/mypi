@@ -480,6 +480,7 @@ export function SessionDetailScreen({
     model?: ModelRef;
     thinkingLevel?: ThinkingLevel;
     cwd?: string;
+    ponytail?: boolean;
   }) => {
     const targetSessionId = session.id;
     setControlBusy(true);
@@ -1234,6 +1235,33 @@ export function SessionDetailScreen({
                     );
                   })}
                 </View>
+
+                {/* Daemons older than the toggle don't report it. */}
+                {typeof session.ponytail === "boolean" && (
+                  <View style={styles.drawerThinkingRow}>
+                    <Pressable
+                      style={[
+                        styles.drawerThinkingPill,
+                        session.ponytail ? styles.drawerThinkingPillActive : null,
+                      ]}
+                      onPress={() =>
+                        handleUpdateSessionConfig({ ponytail: !session.ponytail })
+                      }
+                      accessibilityRole="switch"
+                      accessibilityState={{ checked: session.ponytail }}
+                      accessibilityLabel="Ponytail mode"
+                    >
+                      <Text
+                        style={[
+                          styles.drawerPillText,
+                          session.ponytail ? styles.drawerPillTextActive : null,
+                        ]}
+                      >
+                        Ponytail {session.ponytail ? "on" : "off"}
+                      </Text>
+                    </Pressable>
+                  </View>
+                )}
               </View>
             )}
 

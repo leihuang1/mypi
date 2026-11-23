@@ -99,6 +99,8 @@ export interface SessionSummary {
   cwd: string;
   model: ModelRef;
   thinkingLevel: ThinkingLevel;
+  /** Ponytail's "smallest complete change" rules are in the agent's system prompt. */
+  ponytail: boolean;
   createdAt: number;
   updatedAt: number;
   busy: boolean;
@@ -110,6 +112,8 @@ export interface CreateSessionRequest {
   cwd: string;
   model?: ModelRef;
   thinkingLevel?: ThinkingLevel;
+  /** Default true. */
+  ponytail?: boolean;
 }
 
 export interface UpdateSessionRequest {
@@ -117,6 +121,7 @@ export interface UpdateSessionRequest {
   cwd?: string;
   model?: ModelRef;
   thinkingLevel?: ThinkingLevel;
+  ponytail?: boolean;
 }
 
 export interface CompactSessionRequest {

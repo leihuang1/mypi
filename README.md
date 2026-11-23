@@ -10,6 +10,8 @@ Run [Pi](https://pi.dev) coding sessions on your development machine and follow 
 - File browsing, model selection, and per-session drafts and reading position.
 - Workspace change lists with full-screen, single-column Git diffs.
 - Android background monitoring with local notifications. No third-party push account or credentials required.
+- The agent gets what the Pi CLI gives it: `AGENTS.md` / `CLAUDE.md` from `~/.pi/agent` and the repo, skills from `~/.agents/skills` and the repo's `.agents/skills` / `.pi/skills`, and ponytail (on by default, toggled per session).
+- The agent shouldn't push by accident. Its shell runs with GitHub tokens, gh's login and git's credential helpers removed, and a guard blocks `git push`, `gh auth`, `gh pr merge` and keychain reads. This is not a sandbox: SSH keys and your files stay reachable, so protect default branches with GitHub rulesets.
 
 ## Getting Started
 

@@ -235,8 +235,19 @@ const isMain =
     path.resolve(new URL(import.meta.url).pathname);
 
 if (isMain) {
-  startMyPiServer().catch((err) => {
-    console.error("[mypi-server] Fatal startup error:", err);
-    process.exit(1);
-  });
+  startMyPiServer()
+    .then(({ manager }) => {
+      // Tool commands run in their own process groups, so a stopping daemon must end them itself. No graceful
+      // close: durable state is already on disk, and the restarted session reports those calls as interrupted.
+      for (const signal of ["SIGTERM", "SIGINT"] as const) {
+        process.once(signal, () => {
+          manager.killToolProcesses();
+          process.kill(process.pid, signal);
+        });
+      }
+    })
+    .catch((err) => {
+      console.error("[mypi-server] Fatal startup error:", err);
+      process.exit(1);
+    });
 }

@@ -5,7 +5,7 @@ import { loadScreenHandlers } from "./screen-handlers.js";
 
 const sessionA: SessionSummary = {
   id: "a", name: "A", cwd: "/repo/a",
-  model: { provider: "openai", modelId: "gpt-5" }, thinkingLevel: "high",
+  model: { provider: "openai", modelId: "gpt-5" }, thinkingLevel: "high", ponytail: true,
   createdAt: 1000, updatedAt: 1000, busy: false, entryCount: 0,
 };
 const sessionB = { ...sessionA, id: "b", name: "B", cwd: "/repo/b" };

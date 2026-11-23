@@ -48,6 +48,8 @@ import type {
 } from "@mypi/shared";
 import { NotificationService } from "./notification-service.js";
 import type { LoadedModelsConfig } from "./auth-loader.js";
+import { agentShellEnv, GuardExtension } from "./extensions/guard.js";
+import { createPiCompatExtension } from "./extensions/pi-compat.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -57,6 +59,8 @@ interface CatalogEntry {
   cwd: string;
   model: ModelRef;
   thinkingLevel: ThinkingLevel;
+  /** Absent in catalogs written before the toggle existed: on. */
+  ponytail?: boolean;
   createdAt: number;
   updatedAt: number;
 }
@@ -93,6 +97,10 @@ export class HarnessManager {
   private activeSessions = new Map<string, Promise<ManagedSession>>();
   private activeSubscribers = new Set<() => Promise<void>>();
   private inFlightOps = new Set<Promise<unknown>>();
+  /** The agent's shell environment: the daemon's, minus GitHub credentials. */
+  private readonly agentEnv: NodeJS.ProcessEnv;
+  /** One environment per session and directory, so their tool processes can be killed on shutdown. */
+  private toolEnvs = new Map<string, NodeExecutionEnv>();
   private closing = false;
   private closePromise: Promise<void> | null = null;
 
@@ -109,6 +117,7 @@ export class HarnessManager {
     fs.mkdirSync(path.join(this.dataDir, "sessions"), { recursive: true });
     this.catalogPath = path.join(this.dataDir, "catalog.json");
     this.catalog = this.loadCatalog();
+    this.agentEnv = agentShellEnv(this.dataDir);
     this.notifications = new NotificationService(this.dataDir, (id) => this.catalog.sessions.find((session) => session.id === id)?.name);
   }
 
@@ -499,6 +508,8 @@ export class HarnessManager {
 
       const registry = createRegistry();
       registry.install(CodingTools);
+      registry.install(createPiCompatExtension({ ponytail: () => meta.ponytail !== false }));
+      registry.install(GuardExtension);
 
       const storage = await openNodeSqliteStorage(dbPath);
       const harness = await Harness.open(
@@ -506,10 +517,7 @@ export class HarnessManager {
         {
           models: this.modelsConfig.models,
           registry,
-          env: ({ cwd }) =>
-            new NodeExecutionEnv({
-              cwd: cwd && fs.existsSync(cwd) ? cwd : meta.cwd,
-            }),
+          env: ({ cwd }) => this.toolEnv(meta, cwd),
           onReport: (err) => {
             console.error(`[mypi-server] Harness error (${meta.id}):`, err);
           },
@@ -571,6 +579,25 @@ export class HarnessManager {
     }
   }
 
+  private toolEnv(meta: CatalogEntry, cwd: string | undefined): NodeExecutionEnv {
+    const dir = cwd && fs.existsSync(cwd) ? cwd : meta.cwd;
+    const key = `${meta.id}\0${dir}`;
+    let env = this.toolEnvs.get(key);
+    if (!env) {
+      env = new NodeExecutionEnv({ cwd: dir, shellEnv: this.agentEnv });
+      this.toolEnvs.set(key, env);
+    }
+    return env;
+  }
+
+  /**
+   * Kill the agent's running tool processes (and their process groups). For a daemon about to exit: they would
+   * otherwise outlive it, while the restarted session reports them as interrupted.
+   */
+  killToolProcesses(): void {
+    for (const env of this.toolEnvs.values()) void env.cleanup(BACKGROUND_CONTEXT);
+  }
+
   private async buildSessionSummary(meta: CatalogEntry): Promise<SessionSummary> {
     try {
       const managed = await this.openManagedSession(meta);
@@ -592,6 +619,7 @@ export class HarnessManager {
         cwd: agent.cwd || meta.cwd,
         model: agent.model || meta.model,
         thinkingLevel: (agent.thinkingLevel as ThinkingLevel) || meta.thinkingLevel,
+        ponytail: meta.ponytail !== false,
         createdAt: meta.createdAt,
         updatedAt: meta.updatedAt,
         busy,
@@ -604,6 +632,7 @@ export class HarnessManager {
         cwd: meta.cwd,
         model: meta.model,
         thinkingLevel: meta.thinkingLevel,
+        ponytail: meta.ponytail !== false,
         createdAt: meta.createdAt,
         updatedAt: meta.updatedAt,
         busy: false,
@@ -642,6 +671,7 @@ export class HarnessManager {
         model: req.model ?? this.modelsConfig.defaultModel,
         thinkingLevel:
           req.thinkingLevel ?? this.modelsConfig.defaultThinkingLevel,
+        ponytail: req.ponytail ?? true,
         createdAt: now,
         updatedAt: now,
       };
@@ -683,6 +713,9 @@ export class HarnessManager {
       }
       if (req.thinkingLevel) {
         meta.thinkingLevel = req.thinkingLevel;
+      }
+      if (typeof req.ponytail === "boolean") {
+        meta.ponytail = req.ponytail;
       }
       if (req.cwd && req.cwd.trim()) {
         const resolvedCwd = this.expandUserPath(req.cwd);
@@ -734,6 +767,10 @@ export class HarnessManager {
         } catch {
           // Ignore close errors
         }
+      }
+
+      for (const key of this.toolEnvs.keys()) {
+        if (key.startsWith(`${meta.id}\0`)) this.toolEnvs.delete(key);
       }
 
       const sessionDir = path.join(this.dataDir, "sessions", meta.id);
@@ -1130,6 +1167,7 @@ export class HarnessManager {
           );
         }
       }
+      this.toolEnvs.clear();
     })();
     return this.closePromise;
   }
