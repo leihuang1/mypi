@@ -267,10 +267,10 @@ export function SessionDetailScreen({
   sessionRef.current = session;
   const summaryGenRef = useRef(0);
   const lastSummaryAtRef = useRef(0);
-  // The question the daemon took an answer to, by id, and the answer's submission: a summary still showing it (a
-  // snapshot or read from before the daemon took the answer) mustn't bring its chips back. A newer question has
-  // another id. Withdrawing that answer before it ran clears it.
-  const answeredRef = useRef<{ question: number; submission?: number } | null>(null);
+  // Every question the daemon took an answer to here, by id, with the answer's submission: a summary still showing
+  // one (a snapshot or read from before the daemon took the answer) is out of date. Withdrawing an answer before it
+  // ran makes its question unanswered again.
+  const answeredRef = useRef(new Map<number, number | undefined>());
 
   // Quick @-mention inline directory browser state
   const [quickBrowsePath, setQuickBrowsePath] = useState<string>(session.cwd);
@@ -302,20 +302,17 @@ export function SessionDetailScreen({
   };
 
   /**
-   * Apply a summary from the daemon, unless it's older than one already applied (a slow read, a late snapshot).
-   * Returns what was applied: an answered question is taken out, and the summary then says running.
+   * Apply a summary from the daemon, unless it's out of date: older than one already applied (a slow read, a late
+   * snapshot), or still showing a question answered here (whatever its timestamp). Returns it if applied.
    */
   const applySummary = (incoming: SessionSummary): SessionSummary | undefined => {
     if (incoming.id !== sessionRef.current.id || incoming.updatedAt < sessionRef.current.updatedAt) return undefined;
-    const answered = answeredRef.current;
-    const updated = answered !== null && incoming.question?.id === answered.question
-      ?{ ...incoming, status: "running" as const, question: undefined }
-      : incoming;
+    if (incoming.question?.id !== undefined && answeredRef.current.has(incoming.question.id)) return undefined;
     // Now, not at the next render: a second summary in the same batch is compared with this one.
-    sessionRef.current = updated;
+    sessionRef.current = incoming;
     lastSummaryAtRef.current = Date.now();
-    onSessionUpdated?.(updated);
-    return updated;
+    onSessionUpdated?.(incoming);
+    return incoming;
   };
   /** A change made here (Ship, Archive, a message): reads started before it are out of date. */
   const appliedLocally = (updated: SessionSummary) => {
@@ -498,9 +495,9 @@ export function SessionDetailScreen({
       saveSessionView(viewKey, { failedDraft: null });
       // Answered: that question goes wherever it still shows, and the summary is read again. A newer question stays.
       if (answers !== undefined && mountedRef.current && currentSessionIdRef.current === targetSessionId) {
-        answeredRef.current = { question: answers, submission: sent?.submissionId };
+        answeredRef.current.set(answers, sent?.submissionId);
         if (sessionRef.current.question?.id === answers) {
-          applySummary(sessionRef.current);
+          applySummary({ ...sessionRef.current, status: "running", question: undefined });
           refreshSummary();
         }
       }
@@ -574,11 +571,11 @@ export function SessionDetailScreen({
     const targetSessionId = session.id;
     try {
       const result = await client.abortSubmission(targetSessionId, submissionId);
-      // The answer was withdrawn before it ran: its question is unanswered again.
-      if (result?.status === "aborted" && answeredRef.current?.submission === submissionId) {
-        answeredRef.current = null;
-        if (mountedRef.current && currentSessionIdRef.current === targetSessionId) refreshSummary();
-      }
+      // An answer withdrawn before it ran: its question is unanswered again.
+      const withdrawn = result?.status === "aborted"
+        ? [...answeredRef.current].filter(([, submission]) => submission === submissionId) : [];
+      for (const [question] of withdrawn) answeredRef.current.delete(question);
+      if (withdrawn.length && mountedRef.current && currentSessionIdRef.current === targetSessionId) refreshSummary();
     } catch (err) {
       if (mountedRef.current && currentSessionIdRef.current === targetSessionId) {
         setConnError(err instanceof Error ? err.message : String(err));

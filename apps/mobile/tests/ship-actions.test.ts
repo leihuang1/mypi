@@ -20,7 +20,7 @@ function screen(client: Record<string, unknown>, session: Record<string, unknown
     topSheet: null, controlBusy: false, shipPreview: null, shipMessage: "", sending: false, failedDraft: null, error: null,
     mountedRef: { current: true }, currentSessionIdRef: { current: "s1" }, isNearBottomRef: { current: false },
     controlBusyRef: { current: false }, previewGenRef: { current: 0 }, sessionRef: { current: session },
-    summaryGenRef: { current: 0 }, lastSummaryAtRef: { current: 0 }, answeredRef: { current: null }, viewKey: "v",
+    summaryGenRef: { current: 0 }, lastSummaryAtRef: { current: 0 }, answeredRef: { current: new Map() }, viewKey: "v",
     // The parent: it rerenders the screen later, so it doesn't touch the screen's refs.
     onSessionUpdated: (summary: any) => { updates.push(summary); state.session = summary; },
     timers: [] as (() => void)[],
@@ -201,6 +201,16 @@ it("keeps an answered question gone and a newer one shown, in whatever order sum
   await tick();
   assert.deepEqual([withdrawn.updates.at(-1).status, withdrawn.updates.at(-1).question?.id], ["needs_you", 5]);
 
+  // Two questions answered in turn, then the run's done; a read from before the first answer, stamped as late as the
+  // done summary, still can't bring back the first question.
+  const two = screen({}, asked);
+  await two.state.handleAnswer("tabs");
+  two.state.applySummary({ id: "s1", updatedAt: 2, status: "needs_you", question: { text: "Deploy now?", id: 9 } });
+  await two.state.handleAnswer("yes");
+  two.state.applySummary({ id: "s1", updatedAt: 3, status: "done" });
+  assert.equal(two.state.applySummary({ ...asked, updatedAt: 3 }), undefined);
+  assert.equal(two.updates.at(-1).status, "done");
+
   // A read from before the daemon took the answer, stamped as late as the answer, arriving after the run's own
   // summary: it still shows the answered question, so its chips stay gone.
   const read = screen({}, asked);
@@ -212,7 +222,7 @@ it("keeps an answered question gone and a newer one shown, in whatever order sum
   const { state, updates } = screen({}, asked);
   await state.handleAnswer("tabs");
   assert.equal(updates.at(-1).question, undefined);
-  assert.deepEqual(plain(state.applySummary({ ...asked })), { id: "s1", updatedAt: 1, status: "running" });
+  assert.equal(state.applySummary({ ...asked }), undefined, "out of date: not applied");
   assert.equal(updates.at(-1).question, undefined);
 
   // Two summaries before a rerender: the older second one is dropped.
