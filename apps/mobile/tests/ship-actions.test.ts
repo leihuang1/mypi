@@ -43,7 +43,7 @@ function screen(client: Record<string, unknown>, session: Record<string, unknown
   const handlers = loadScreenHandlers(
     new URL("../src/screens/SessionDetailScreen.tsx", import.meta.url),
     ["claimControl", "releaseControl", "setTopSheet", "applySummary", "appliedLocally", "refreshSummary", "openPr",
-      "submitMessage", "handleRetryFailedDraft", "openShip", "handleShip", "handleArchive", "handleAnswer"],
+      "submitMessage", "handleRetryFailedDraft", "handleAbortSubmission", "openShip", "handleShip", "handleArchive", "handleAnswer"],
     state,
   );
   return { state: handlers, alerts, updates, opened, sent };
@@ -102,7 +102,7 @@ it("archives at once when there's no work, and asks first when there is", async 
   await state.handleArchive();
   assert.deepEqual(plain(calls), [{ force: false }]);
   assert.equal(alerts.length, 1);
-  assert.match(alerts[0].message, /1 个未提交的改动会被丢弃\n1 个被忽略的文件（如 .env）会被删除\n2 个未推送的提交会留在本地分支 mypi\/s1 上（游离 HEAD 上的提交在 mypi\/s1-detached）/);
+  assert.match(alerts[0].message, /1 个未提交的改动会被丢弃\n1 个被忽略的文件（如 .env）会被删除\n2 个未推送的提交会留在本地分支 mypi\/s1 上（游离 HEAD 上的提交在 mypi\/s1-detached，这个名字已被占用时加上提交号）/);
   assert.equal(state.topSheet, "ship", "nothing happened yet");
   alerts[0].buttons.find((b) => b.text === "归档")!.onPress!();
   await tick();
@@ -188,6 +188,18 @@ it("keeps an answered question gone and a newer one shown, in whatever order sum
   retry.state.applySummary({ id: "s1", updatedAt: 2, status: "needs_you", question: { text: "Deploy now?", id: 9 } });
   await retry.state.handleRetryFailedDraft();
   assert.deepEqual([retry.updates.at(-1).status, retry.updates.at(-1).question?.text], ["needs_you", "Deploy now?"]);
+
+  // The answer was queued, then withdrawn before it ran: the question is unanswered again, and shows.
+  const withdrawn = screen({
+    sendMessage: async () => ({ submissionId: 41, status: "queued" }),
+    abortSubmission: async () => ({ submissionId: 41, status: "aborted" }),
+    getSession: async () => ({ ...asked, updatedAt: 4 }),
+  }, asked);
+  await withdrawn.state.handleAnswer("tabs");
+  assert.equal(withdrawn.updates.at(-1).question, undefined);
+  await withdrawn.state.handleAbortSubmission(41);
+  await tick();
+  assert.deepEqual([withdrawn.updates.at(-1).status, withdrawn.updates.at(-1).question?.id], ["needs_you", 5]);
 
   // A read from before the daemon took the answer, stamped as late as the answer, arriving after the run's own
   // summary: it still shows the answered question, so its chips stay gone.

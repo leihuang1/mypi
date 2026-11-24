@@ -267,9 +267,10 @@ export function SessionDetailScreen({
   sessionRef.current = session;
   const summaryGenRef = useRef(0);
   const lastSummaryAtRef = useRef(0);
-  // The question the daemon took an answer to, by id: a summary still showing it (a snapshot or read from before the
-  // daemon took the answer) mustn't bring its chips back. A newer question has another id.
-  const answeredRef = useRef<number | null>(null);
+  // The question the daemon took an answer to, by id, and the answer's submission: a summary still showing it (a
+  // snapshot or read from before the daemon took the answer) mustn't bring its chips back. A newer question has
+  // another id. Withdrawing that answer before it ran clears it.
+  const answeredRef = useRef<{ question: number; submission?: number } | null>(null);
 
   // Quick @-mention inline directory browser state
   const [quickBrowsePath, setQuickBrowsePath] = useState<string>(session.cwd);
@@ -307,8 +308,8 @@ export function SessionDetailScreen({
   const applySummary = (incoming: SessionSummary): SessionSummary | undefined => {
     if (incoming.id !== sessionRef.current.id || incoming.updatedAt < sessionRef.current.updatedAt) return undefined;
     const answered = answeredRef.current;
-    const updated = answered !== null && incoming.question?.id === answered
-      ? { ...incoming, status: "running" as const, question: undefined }
+    const updated = answered !== null && incoming.question?.id === answered.question
+      ?{ ...incoming, status: "running" as const, question: undefined }
       : incoming;
     // Now, not at the next render: a second summary in the same batch is compared with this one.
     sessionRef.current = updated;
@@ -492,12 +493,12 @@ export function SessionDetailScreen({
       persisted = true;
       // Record identity also distinguishes overlapping retries of the same request ID.
       if (getSessionView(viewKey).failedDraft !== pending) return;
-      await client.sendMessage(targetSessionId, request);
+      const sent = await client.sendMessage(targetSessionId, request);
       if (getSessionView(viewKey).failedDraft !== pending) return;
       saveSessionView(viewKey, { failedDraft: null });
       // Answered: that question goes wherever it still shows, and the summary is read again. A newer question stays.
       if (answers !== undefined && mountedRef.current && currentSessionIdRef.current === targetSessionId) {
-        answeredRef.current = answers;
+        answeredRef.current = { question: answers, submission: sent?.submissionId };
         if (sessionRef.current.question?.id === answers) {
           applySummary(sessionRef.current);
           refreshSummary();
@@ -572,7 +573,12 @@ export function SessionDetailScreen({
   const handleAbortSubmission = async (submissionId: number) => {
     const targetSessionId = session.id;
     try {
-      await client.abortSubmission(targetSessionId, submissionId);
+      const result = await client.abortSubmission(targetSessionId, submissionId);
+      // The answer was withdrawn before it ran: its question is unanswered again.
+      if (result?.status === "aborted" && answeredRef.current?.submission === submissionId) {
+        answeredRef.current = null;
+        if (mountedRef.current && currentSessionIdRef.current === targetSessionId) refreshSummary();
+      }
     } catch (err) {
       if (mountedRef.current && currentSessionIdRef.current === targetSessionId) {
         setConnError(err instanceof Error ? err.message : String(err));
@@ -718,7 +724,7 @@ export function SessionDetailScreen({
       const what = [
         result.uncommitted > 0 ? `${result.uncommitted} 个未提交的改动会被丢弃` : "",
         result.ignored > 0 ? `${result.ignored} 个被忽略的文件（如 .env）会被删除` : "",
-        result.unpushed > 0 ? `${result.unpushed} 个未推送的提交会留在本地分支 ${session.branch} 上（游离 HEAD 上的提交在 ${session.branch}-detached）` : "",
+        result.unpushed > 0 ? `${result.unpushed} 个未推送的提交会留在本地分支 ${session.branch} 上（游离 HEAD 上的提交在 ${session.branch}-detached，这个名字已被占用时加上提交号）` : "",
       ].filter(Boolean).join("\n");
       Alert.alert("归档这个会话？", `${what}\n归档后会话只能查看。`, [
         { text: "取消", style: "cancel" },
