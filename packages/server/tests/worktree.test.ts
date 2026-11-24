@@ -422,46 +422,63 @@ it("loses nothing written after the count: late files go to trash, a late commit
   assert.deepEqual([refused.removed, /子模块/.test(refused.blocked ?? "")], [false, true]);
   assert.ok(fs.existsSync(path.join(wt9.path, "mod", "s.txt")));
 
-  // Trash older than a week is emptied by the next removal; a name that isn't one removal gave it is left alone.
-  const old = path.join(root, ".mypi-trash", `old-${Date.now() - 8 * 86_400_000}`);
-  fs.mkdirSync(old);
-  write(path.join(root, ".mypi-trash", "notes-2024", "f.txt"), "mine\n");
-  const wt3 = (await createSessionWorktree(repo, root, "l3"))!;
-  // And old metadata a removal kept (marked), but not a worktree of the owner's whose name only looks like it.
+  // What a removal kept goes a week later at the next removal: its metadata with its copy in trash. (Aged here by
+  // renaming the metadata as if made eight days ago.)
   const weekAgo = Date.now() - 8 * 86_400_000;
-  const oldMeta = path.join(worktreesDir, `gone-mypi-retired-${weekAgo}`);
+  const removedAndAged = async (name: string) => {
+    const wt = (await createSessionWorktree(repo, root, name))!;
+    assert.equal((await removeSessionWorktree(wt)).removed, true);
+    const aged = retiredOf(wt).replace(/-\d{13}$/, `-${weekAgo}`);
+    fs.renameSync(retiredOf(wt), aged);
+    return { meta: aged, copy: path.dirname(fs.readFileSync(path.join(aged, "gitdir"), "utf8").trim()) };
+  };
+  const expiring = await removedAndAged("la");
+  // Taken back by the owner, repaired (its copy works again) or unlocked: theirs now, and it stays.
+  const repaired = await removedAndAged("lb");
+  // What `git worktree repair` writes there with worktree.useRelativePaths (run with no paths, it would take back
+  // every copy at once).
+  fs.writeFileSync(path.join(repaired.copy, ".git"), `gitdir: ${path.relative(repaired.copy, repaired.meta)}\n`);
+  assert.equal(git(repaired.copy, "rev-parse", "--is-inside-work-tree"), "true");
+  const unlocked = await removedAndAged("lc");
+  git(repo, "worktree", "unlock", unlocked.copy);
+  // Moved out of trash, still locked (what `git worktree move -f -f` does: the folder, and its path in the metadata).
+  const movedOut = await removedAndAged("le");
+  const outside = path.join(dir, "taken-back");
+  fs.renameSync(movedOut.copy, outside);
+  fs.writeFileSync(path.join(movedOut.meta, "gitdir"), `${path.join(outside, ".git")}\n`);
+  // A copy that can't be emptied: its metadata stays while anything of it does.
+  const stuck = await removedAndAged("ld");
+  write(path.join(stuck.copy, "inner", "f.txt"), "f\n");
+  fs.chmodSync(path.join(stuck.copy, "inner"), 0o400);
+  // Anything else in the trash is the owner's, whatever its name, and so is metadata not marked as a removal's.
+  write(path.join(root, ".mypi-trash", `owner-backup-${weekAgo}`, "only.txt"), "mine\n");
+  write(path.join(root, ".mypi-trash", `notes-${weekAgo}`), "mine\n");
+  const wt3 = (await createSessionWorktree(repo, root, "l3"))!;
   const ownerMeta = path.join(worktreesDir, `mine-${weekAgo}`);
-  write(path.join(oldMeta, "mypi-retired"), "");
   write(path.join(ownerMeta, "gitdir"), `${path.join(dir, "mine", ".git")}\n`);
-  assert.equal((await removeSessionWorktree(wt3)).branchDeleted, true, "nothing but the base on it");
-  assert.equal(fs.existsSync(old), false);
-  assert.equal(fs.readFileSync(path.join(root, ".mypi-trash", "notes-2024", "f.txt"), "utf8"), "mine\n");
-  assert.deepEqual([fs.existsSync(oldMeta), fs.existsSync(ownerMeta)], [false, true]);
-  fs.rmSync(ownerMeta, { recursive: true });
-  // Old trash that can't be emptied (its contents can't be reached): the removal still finishes, and the checkout's
-  // metadata isn't put back over a folder that's already in trash.
-  const stuck = path.join(root, ".mypi-trash", `stuck-${Date.now() - 8 * 86_400_000}`);
-  write(path.join(stuck, "inner", "f.txt"), "f\n");
-  fs.chmodSync(stuck, 0o400);
-  const wt13 = (await createSessionWorktree(repo, root, "l13"))!;
   try {
-    assert.equal((await removeSessionWorktree(wt13)).removed, true);
-    assert.equal(git(repo, "worktree", "list", "--porcelain").includes(wt13.path), false, "not registered again");
-    assert.ok(fs.readdirSync(path.join(root, ".mypi-trash")).some((name) => name.startsWith(`${path.basename(wt13.path)}-`)));
+    assert.equal((await removeSessionWorktree(wt3)).branchDeleted, true, "nothing but the base on it");
   } finally {
-    fs.chmodSync(stuck, 0o700);
+    fs.chmodSync(path.join(stuck.copy, "inner"), 0o700);
   }
-  // Trash that can be written to but not listed: the same.
-  for (const unlistable of [path.join(root, ".mypi-trash")]) {
-    const wt14 = (await createSessionWorktree(repo, root, `l14-${path.basename(unlistable)}`))!;
-    fs.chmodSync(unlistable, 0o300);
-    try {
-      assert.equal((await removeSessionWorktree(wt14)).removed, true, unlistable);
-    } finally {
-      fs.chmodSync(unlistable, 0o755);
-    }
-    assert.equal(git(repo, "worktree", "list", "--porcelain").includes(wt14.path), false);
+  assert.deepEqual([fs.existsSync(expiring.meta), fs.existsSync(expiring.copy)], [false, false], "expired");
+  assert.deepEqual([repaired, unlocked].flatMap((k) => [fs.existsSync(k.meta), fs.existsSync(k.copy)]), [true, true, true, true]);
+  assert.deepEqual([fs.existsSync(movedOut.meta), fs.existsSync(outside)], [true, true]);
+  assert.equal(git(repaired.copy, "rev-parse", "--is-inside-work-tree"), "true", "the repaired copy still works");
+  assert.ok(fs.existsSync(stuck.meta), "kept while its copy is there");
+  assert.equal(fs.readFileSync(path.join(root, ".mypi-trash", `owner-backup-${weekAgo}`, "only.txt"), "utf8"), "mine\n");
+  assert.ok(fs.existsSync(path.join(root, ".mypi-trash", `notes-${weekAgo}`)));
+  assert.ok(fs.existsSync(ownerMeta));
+  fs.rmSync(ownerMeta, { recursive: true });
+  // Trash that can be written to but not listed: removal still finishes, and isn't registered again.
+  const wt14 = (await createSessionWorktree(repo, root, "l14"))!;
+  fs.chmodSync(path.join(root, ".mypi-trash"), 0o300);
+  try {
+    assert.equal((await removeSessionWorktree(wt14)).removed, true);
+  } finally {
+    fs.chmodSync(path.join(root, ".mypi-trash"), 0o755);
   }
+  assert.equal(git(repo, "worktree", "list", "--porcelain").includes(`${wt14.path}\n`), false);
 
   // A catalog entry from before gitDir and baseCommit were recorded still works, from the checkout.
   const wt4 = (await createSessionWorktree(repo, root, "l4"))!;
@@ -481,6 +498,26 @@ it("puts git's metadata back as it was, unlocked, after a failure before the mov
   const listed = git(repo, "worktree", "list", "--porcelain").split("\n\n").find((e) => e.includes(wt.path))!;
   assert.match(listed, new RegExp(`branch refs/heads/${wt.branch}`));
   assert.doesNotMatch(listed, /locked/);
+});
+
+it("puts git's metadata back if its lock can't be written right after the rename", async () => {
+  const { dir, repo } = fixture("lock-fails");
+  const wt = (await createSessionWorktree(repo, path.join(dir, "worktrees"), "k1"))!;
+  const writeFile = fs.writeFileSync;
+  fs.writeFileSync = ((file: fs.PathOrFileDescriptor, ...rest: unknown[]) => {
+    if (String(file).includes("-mypi-retired-") && String(file).endsWith("/locked")) {
+      throw Object.assign(new Error("EACCES: permission denied"), { code: "EACCES" });
+    }
+    return (writeFile as (...args: unknown[]) => void)(file, ...rest);
+  }) as typeof fs.writeFileSync;
+  try {
+    await assert.rejects(removeSessionWorktree(wt), /EACCES/);
+  } finally {
+    fs.writeFileSync = writeFile;
+  }
+  assert.equal(git(wt.path, "rev-parse", "--abbrev-ref", "HEAD"), wt.branch, "the checkout works as before");
+  // And a later try, once it can, removes it.
+  assert.equal((await removeSessionWorktree(wt)).removed, true);
 });
 
 it("never deletes through a symbolic ref: a session branch that's an alias of main", async () => {
@@ -538,7 +575,7 @@ it("says how to put back a commit made on the branch while it was being deleted,
     console.warn = warn;
   }
   assert.equal(git(repo, "rev-parse", wt2.branch), git(repo, "rev-parse", `${wt2.baseCommit}~1`));
-  assert.deepEqual(warned.filter((w) => w.includes("rebase")), []);
+  assert.deepEqual(warned.filter((w) => w.includes("made again")), []);
 
   // Deleted, then made again by an amended commit (it has a parent, just not the old tip): its history is fine.
   const wt3 = (await createSessionWorktree(repo, path.join(dir, "worktrees"), "c3"))!;
@@ -555,7 +592,7 @@ it("says how to put back a commit made on the branch while it was being deleted,
     console.warn = warn;
   }
   assert.equal(git(repo, "log", "-1", "--format=%s", wt3.branch), "amended");
-  assert.deepEqual(warned.filter((w) => w.includes("rebase")), []);
+  assert.deepEqual(warned.filter((w) => w.includes("made again")), []);
 });
 
 it("keeps an old detached commit even if git's prune and gc run just as the metadata is renamed", async () => {

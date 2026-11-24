@@ -246,19 +246,39 @@ function tidy(what: string, run: () => void): void {
 
 /** Marks a worktree's metadata folder that a removal kept (see `removeSessionWorktree`): only those are expired. */
 const RETIRED = "mypi-retired";
+/** How the lock a removal puts on it starts: one the owner put there, or none, means it's theirs. */
+const RETIRED_LOCK = "mypi removed this worktree";
 
 /**
- * What removal put in `dir` over a week ago: names it gave (`<name>-<13 digits>`, the time in ms), and with
- * `marked`, only folders holding that file.
+ * What removals kept, over a week ago: each marked metadata folder in `worktrees/`, with the copy of the checkout in
+ * trash it records, only while both are as removal left them. One the owner has taken back (unlocked, repaired so
+ * its copy works again, or moved out of trash) is theirs, and stays, as does anything else in the trash.
  */
-function emptyTrash(dir: string, marked?: string): void {
-  let names: string[] = [];
-  tidy(`list ${dir}`, () => { names = fs.existsSync(dir) ? fs.readdirSync(dir) : []; });
-  for (const name of names) {
-    const at = Number(/^.+-(\d{13})$/.exec(name)?.[1]);
-    if (at && Date.now() - at > TRASH_DAYS * 86_400_000 && (!marked || fs.existsSync(path.join(dir, name, marked)))) {
-      tidy(`empty ${path.join(dir, name)}`, () => fs.rmSync(path.join(dir, name), { recursive: true, force: true }));
+function expireRetired(worktrees: string): void {
+  const read = (file: string) => {
+    try {
+      return fs.readFileSync(file, "utf8").trim();
+    } catch {
+      return undefined;
     }
+  };
+  let names: string[] = [];
+  tidy(`list ${worktrees}`, () => { names = fs.readdirSync(worktrees); });
+  for (const name of names) {
+    const meta = path.join(worktrees, name);
+    const at = Number(new RegExp(`-${RETIRED}-(\\d{13})$`).exec(name)?.[1]);
+    if (!at || Date.now() - at <= TRASH_DAYS * 86_400_000 || !fs.existsSync(path.join(meta, RETIRED))) continue;
+    const copy = path.dirname(read(path.join(meta, "gitdir")) ?? "");
+    // Repaired: its copy's `.git` names this folder again (by path or, with worktree.useRelativePaths, relatively).
+    const untouched = read(path.join(meta, "locked"))?.startsWith(RETIRED_LOCK) && path.isAbsolute(copy) &&
+      (copy === meta || (path.basename(path.dirname(copy)) === TRASH && /-\d{13}$/.test(copy) &&
+        !read(path.join(copy, ".git"))?.includes(name)));
+    if (!untouched) continue;
+    // The copy first: its metadata keeps what it reaches from gc until it's gone.
+    tidy(`empty ${copy}`, () => {
+      if (copy !== meta) fs.rmSync(copy, { recursive: true, force: true });
+      fs.rmSync(meta, { recursive: true, force: true });
+    });
   }
 }
 
@@ -304,7 +324,8 @@ function refusal(meta: string): string | undefined {
  * A locked worktree, or one holding submodule repositories (their commits may exist nowhere else), is refused
  * whatever `force` says: `blocked` says why. A folder at the path that git doesn't know as this worktree is left
  * alone: `unregistered`. Without `force` the checkout is moved to `.mypi-trash/` beside it, not deleted, so a file
- * written after the count is there for a week, and git lists it there as a locked worktree. Throws, removing
+ * written after the count is there for a week (unless the owner takes it back: then it stays), and git lists it
+ * there as a locked worktree. Throws, removing
  * nothing, when the work can't be checked. `pushed`: the head GitHub merged, if known.
  */
 export async function removeSessionWorktree(
@@ -335,16 +356,18 @@ export async function removeSessionWorktree(
     if (refused) return kept(refused);
     retired = `${meta}-${RETIRED}-${Date.now()}`;
     fs.renameSync(meta, retired);
-    // Checked again where nothing can change it any more: a submodule added or a lock taken just before the rename.
-    const late = refusal(retired);
-    if (late) {
-      restore(retired, meta);
-      return kept(late);
-    }
-    fs.writeFileSync(path.join(retired, "locked"),
-      `mypi removed this worktree; kept until ${new Date(Date.now() + TRASH_DAYS * 86_400_000).toISOString()}\n`);
   }
+  let late: string | undefined;
+  let locked = false;
   try {
+    if (retired) {
+      // Checked again where nothing can change it any more: a submodule added or a lock taken just before the rename.
+      late = refusal(retired);
+      if (late) throw new Error(late);
+      fs.writeFileSync(path.join(retired, "locked"),
+        `${RETIRED_LOCK}; kept until ${new Date(Date.now() + TRASH_DAYS * 86_400_000).toISOString()}\n`);
+      locked = true;
+    }
     // HEAD as git resolves it from the renamed metadata: any object format, any ref storage (reftable's HEAD file
     // isn't the commit). Not resolving is fine only for a branch with no commits yet.
     if (retired) head = await git(gitDir, ["--git-dir", retired, "rev-parse", "--verify", "--quiet", "HEAD^{commit}"]).catch(() => "");
@@ -367,12 +390,13 @@ export async function removeSessionWorktree(
     // Not moved (or a forced delete stopped partway): the checkout is still there, so its metadata goes back.
     if (retired && meta) {
       try {
-        fs.rmSync(path.join(retired, "locked"), { force: true });
+        if (locked) fs.rmSync(path.join(retired, "locked"), { force: true }); // ours only: an owner's lock stays
         restore(retired, meta);
       } catch (again) {
         throw new Error(`${firstLine(err)}; and git's metadata for ${checkout} couldn't be put back from ${retired}: ${firstLine(again)}`);
       }
     }
+    if (late) return kept(late);
     throw err;
   }
   // From here the checkout is in trash whatever happens: housekeeping can fail, but doesn't undo that.
@@ -391,9 +415,8 @@ export async function removeSessionWorktree(
   }
   if (moved) {
     for (const p of regenerable) tidy(`delete ${p} from ${moved}`, () => fs.rmSync(path.join(moved!, p), { recursive: true, force: true }));
-    emptyTrash(path.dirname(moved));
   }
-  if (retired) emptyTrash(path.dirname(retired), RETIRED);
+  if (retired) expireRetired(path.dirname(retired));
 
   const ref = `refs/heads/${worktree.branch}`;
   // An alias of another branch (a symbolic ref) isn't the session's branch: deleting it isn't ours to do.
