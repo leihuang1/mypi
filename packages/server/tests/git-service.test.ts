@@ -83,6 +83,18 @@ it("counts every changed file for a notice, binary, empty and mode-only ones too
     // A text file past the per-file cap is counted as a file, and the line counts say they're short.
     write("big.txt", "x\n".repeat(600_000));
     assert.deepEqual(await changeStats(cwd), { files: 6, additions: 4, deletions: 1, partial: true });
+
+    // The agent started an unrelated history: no comparison with the session's base, rather than "no changes".
+    const start = git("rev-parse", "HEAD").toString().trim();
+    fs.rmSync(path.join(cwd, "big.txt"));
+    git("add", "-A");
+    git("commit", "-qm", "work");
+    git("switch", "-q", "--orphan", "docs");
+    write("docs.md", "docs\n");
+    git("add", "docs.md");
+    git("commit", "-qm", "docs");
+    await assert.rejects(changeStats(cwd, undefined, start), /can't be measured/);
+    await assert.rejects(inspectGitDirectory(cwd, undefined, start), /can't be measured/);
   } finally {
     fs.rmSync(cwd, { recursive: true, force: true });
   }

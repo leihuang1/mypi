@@ -178,6 +178,9 @@ export async function inspectGitDirectory(cwd: string, baseRef?: string, baseCom
     base = (await runGit(repoRoot, ["hash-object", "-t", "tree", "/dev/null"])).trim();
   }
   const merged = await mergeBase(repoRoot, base, baseRef, baseCommit);
+  // As for the notice's counts: an orphan branch's commits would vanish from a diff against HEAD. The app shows the
+  // panel as not updated instead of clean.
+  if (!merged && (baseRef || baseCommit)) throw new Error("The session's changes can't be measured against its base");
   if (merged) [base, result.baseRef] = [merged, baseRef];
   result.branch = (await runGit(repoRoot, ["symbolic-ref", "--quiet", "--short", "HEAD"]).catch(() => "")).trim() || undefined;
   const diffArgs = ["diff", "--no-color", "--src-prefix=a/", "--dst-prefix=b/", "--no-ext-diff", "--no-textconv", "--no-renames", "--ignore-submodules=all", base];
