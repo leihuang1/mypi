@@ -337,6 +337,8 @@ it("archives on request: warns about work first, keeps unpushed commits on the b
     const locked = await mgr.createSession({ cwd: repo });
     git(repo, "worktree", "lock", locked.worktreePath!);
     await assert.rejects(mgr.archiveSession(locked.id, {}), (err: Error & { status?: number }) => err.status === 409 && /锁住/.test(err.message));
+    // Confirming doesn't make it safe either.
+    await assert.rejects(mgr.archiveSession(locked.id, { force: true }), (err: Error & { status?: number }) => err.status === 409 && /锁住/.test(err.message));
     assert.ok(fs.existsSync(locked.worktreePath!), "put back where it was");
     git(repo, "worktree", "unlock", locked.worktreePath!);
 
