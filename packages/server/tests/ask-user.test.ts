@@ -7,6 +7,8 @@ import { it } from "node:test";
 import { createModels, type FauxResponseFactory, fauxAssistantMessage, fauxProvider, fauxToolCall } from "@earendil-works/pi-ai";
 import type { NotificationFrame, RawEntryRecord, RunNotification } from "@mypi/shared";
 import type { LoadedModelsConfig } from "../src/auth-loader.js";
+import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
+import type { Conversation, Harness } from "@earendil-works/pi-durable";
 import { conversationState } from "../src/extensions/ask-user.js";
 import { HarnessManager } from "../src/harness-mgr.js";
 
@@ -84,7 +86,9 @@ it("ends a run on ask_user, shows the question, and reports done with the change
     assert.equal(faux.state.callCount, 2, "ask_user ends the run without another model request");
     const asked = await manager.getSessionSummary(session.id);
     assert.equal(asked.status, "needs_you");
-    assert.deepEqual(asked.question, { text: "Which greeting?", choices: ["hello", "hi"] });
+    const { id, ...shown } = asked.question!;
+    assert.deepEqual([shown, typeof id], [{ text: "Which greeting?", choices: ["hello", "hi"] }, "number"]);
+    assert.equal((await manager.getSessionSummary(session.id)).question?.id, id, "the same question keeps its id");
     const question = await waitFor(() => notices[0], "the question notice");
     assert.deepEqual([question.title, question.body, question.kind, question.choices],
       ["❓ greeting", "Which greeting?\nhello / hi", "question", ["hello", "hi"]]);
@@ -215,19 +219,88 @@ it("takes its status from the runtime's records: not a retried old request, a wi
   }
 });
 
+it("reads the input that ran last, in the order the runtime placed it, and never compacts a waiting question away", async () => {
+  const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "mypi-order-")));
+  const { faux, modelsConfig } = testModels();
+  const manager = new HarnessManager({ dataDir: path.join(root, "data"), startDirs: [], modelsConfig });
+  const status = async (id: string) => (await manager.getSessionSummary(id)).status;
+  const settled = async (id: string) => faux.getPendingResponseCount() === 0 && !(await manager.getSessionSummary(id)).busy;
+  const gate = () => {
+    let entered!: () => void;
+    let release!: () => void;
+    const started = new Promise<void>((resolve) => { entered = resolve; });
+    const open = new Promise<void>((resolve) => { release = resolve; });
+    return { started, release, wait: async () => { entered(); await open; } };
+  };
+  const missing = { model: { provider: "missing", modelId: "missing" } };
+  try {
+    // A steer is placed before an older follow-up: the follow-up ran last, and failed.
+    const steered = await manager.createSession({ cwd: root, name: "steered" });
+    const first = gate();
+    faux.setResponses([
+      async () => { await first.wait(); return fauxAssistantMessage([fauxToolCall("bash", { command: "true" })], { stopReason: "toolUse" }); },
+      async () => { await manager.updateSession(steered.id, missing); return fauxAssistantMessage("Did the steer."); },
+    ]);
+    await manager.sendMessage(steered.id, { requestId: "a", content: "go" });
+    await first.started;
+    await manager.sendMessage(steered.id, { requestId: "b", content: "later", whenBusy: "followUp" });
+    await manager.sendMessage(steered.id, { requestId: "c", content: "now", whenBusy: "steer" });
+    first.release();
+    await waitFor(() => settled(steered.id), "both runs");
+    assert.equal(await status(steered.id), "needs_you", "the follow-up's failure, not the steer's success");
+
+    // A reset requested while a follow-up waits is placed first: the follow-up ran in the new context, and failed.
+    const reset = await manager.createSession({ cwd: root, name: "reset" });
+    const second = gate();
+    faux.setResponses([async () => { await second.wait(); return fauxAssistantMessage("First."); }]);
+    await manager.sendMessage(reset.id, { requestId: "a", content: "go" });
+    await second.started;
+    await manager.sendMessage(reset.id, { requestId: "b", content: "after", whenBusy: "followUp" });
+    await manager.resetSession(reset.id);
+    await manager.updateSession(reset.id, missing);
+    second.release();
+    await waitFor(async () => !(await manager.getSessionSummary(reset.id)).busy && (await status(reset.id)) !== "running", "the reset");
+    assert.equal(await status(reset.id), "needs_you");
+
+    // Asked alongside another tool, then a reply long enough that a compaction would summarize the ask away.
+    const asking = await manager.createSession({ cwd: root, name: "asking" });
+    faux.setResponses([
+      fauxAssistantMessage([fauxToolCall("ask_user", { question: "Old or new API?" }), fauxToolCall("bash", { command: "true" })], { stopReason: "toolUse" }),
+      fauxAssistantMessage(`Waiting for your decision. ${"detail ".repeat(30_000)}`),
+    ]);
+    await manager.sendMessage(asking.id, { requestId: "a", content: "go" });
+    await waitFor(() => settled(asking.id), "the run");
+    assert.equal((await manager.getSessionSummary(asking.id)).question?.text, "Old or new API?");
+    // Started on the harness, as an automatic compaction is, past the endpoint's own check: the hook declines it.
+    faux.setResponses([fauxAssistantMessage("Summary of the work so far.")]);
+    const sessions = (manager as unknown as { activeSessions: Map<string, Promise<{ harness: Harness; root: Conversation }>> }).activeSessions;
+    const managed = await sessions.get(asking.id)!;
+    await managed.harness.waitForTask(await managed.root.compact(undefined, BACKGROUND_CONTEXT), BACKGROUND_CONTEXT);
+    const after = await manager.getSessionSummary(asking.id);
+    assert.deepEqual([after.status, after.question?.text, faux.getPendingResponseCount()], ["needs_you", "Old or new API?", 1]);
+  } finally {
+    await manager.close();
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
 it("reads the conversation's state from its last model messages", () => {
-  const entry = (...model: Record<string, unknown>[]): RawEntryRecord => ({ id: 1, conversationId: 0, kind: "x", model });
+  let next = 1;
+  const entry = (...model: Record<string, unknown>[]): RawEntryRecord => ({ id: next++, conversationId: 0, kind: "x", model });
   const user = { role: "user", content: "go" };
   const asking = { role: "assistant", stopReason: "toolUse", content: [{ type: "toolCall", name: "ask_user", arguments: { question: " Q? ", choices: ["a", 3, " "] } }] };
   const result = { role: "toolResult", toolName: "ask_user", content: [] };
   assert.deepEqual(conversationState([]), { failed: false, finished: false });
-  assert.deepEqual(conversationState([entry(user), entry(asking), entry(result)]), { question: { text: "Q?", choices: ["a"] }, failed: false, finished: true });
+  next = 1;
+  assert.deepEqual(conversationState([entry(user), entry(asking), entry(result)]), { question: { text: "Q?", choices: ["a"], id: 2 }, failed: false, finished: true });
   assert.deepEqual(conversationState([entry(user), entry(asking), entry(result), entry(user)]), { failed: false, finished: false }, "answered");
   assert.deepEqual(conversationState([entry(user), entry({ role: "assistant", stopReason: "error", content: [] })]), { failed: true, finished: false });
   assert.deepEqual(conversationState([entry(user), entry({ role: "assistant", stopReason: "aborted", content: [] })]), { failed: false, finished: false });
+  next = 1;
   assert.deepEqual(conversationState([entry(user), entry(asking), entry({ role: "assistant", stopReason: "stop", content: [{ type: "text", text: "done" }] })]),
-    { question: { text: "Q?", choices: ["a"] }, failed: false, finished: true }, "asked, went on: still unanswered");
+    { question: { text: "Q?", choices: ["a"], id: 2 }, failed: false, finished: true }, "asked, went on: still unanswered, the asking entry's id");
   const twice = { role: "assistant", stopReason: "toolUse", content: [
     { type: "toolCall", name: "ask_user", arguments: { question: "A?" } }, { type: "toolCall", name: "ask_user", arguments: { question: "B?" } }] };
-  assert.deepEqual(conversationState([entry(user), entry(twice)]).question, { text: "A?\n\nB?" }, "both questions");
+  next = 1;
+  assert.deepEqual(conversationState([entry(user), entry(twice)]).question, { text: "A?\n\nB?", id: 2 }, "both questions");
 });

@@ -155,6 +155,8 @@ export interface AskedQuestion {
   text: string;
   /** Offered answers; the user may still type their own. */
   choices?: string[];
+  /** The transcript entry that asked it: the same question has the same id however often it's read. */
+  id?: number;
 }
 
 export interface SessionSummary {

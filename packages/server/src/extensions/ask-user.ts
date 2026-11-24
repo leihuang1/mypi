@@ -1,5 +1,5 @@
 import { Type } from "@earendil-works/pi-ai";
-import { defineExtension, defineTool, section } from "@earendil-works/pi-durable";
+import { CompactionTask, defineExtension, defineTool, type Harness, hook, section } from "@earendil-works/pi-durable";
 import type { AskedQuestion, RawEntryRecord } from "@mypi/shared";
 
 export const ASK_USER = "ask_user";
@@ -33,7 +33,24 @@ const instructions = section("mypi_worker", () => [
   "Start your final reply with one line that says what you did: it becomes the notification the user sees.",
 ].join("\n"));
 
-export const AskUserExtension = defineExtension({ name: "mypi-ask-user", tools: [askUser], sections: [instructions] });
+/**
+ * The tool and its instructions, and a compaction hook: a question's ask is the only record of it, so no compaction,
+ * manual or automatic, may summarize away the ask of a question still waiting. A declined overflow compaction ends
+ * the run as an error, which reads as needs-you with the question still there. `harness`: the session's, to read the
+ * conversation as it is now (the hook sees only the range being summarized).
+ */
+export function askUserExtension(harness: () => Harness | undefined) {
+  const keepQuestion = hook(CompactionTask, {
+    async beforeCompact(compaction, api, context) {
+      const conversation = await harness()?.conversation(api.conversationId, context);
+      if (!conversation) return undefined;
+      const { question } = conversationState((await conversation.context(context)).entries as unknown as RawEntryRecord[]);
+      const summarized = question?.id !== undefined && compaction.entries.some((entry) => entry.id === question.id);
+      return summarized ? { decline: true as const } : undefined;
+    },
+  });
+  return defineExtension({ name: "mypi-ask-user", tools: [askUser], sections: [instructions], hooks: [keepQuestion] });
+}
 
 type Part = { type?: unknown; text?: unknown; name?: unknown; arguments?: unknown };
 
@@ -81,15 +98,18 @@ export function lastReply(entries: readonly RawEntryRecord[]): string | undefine
  * request failed, and whether the agent finished a reply.
  */
 export function conversationState(entries: readonly RawEntryRecord[]): { question?: AskedQuestion; failed: boolean; finished: boolean } {
-  const messages = entries.flatMap((entry) => (entry.model ?? []) as Record<string, unknown>[]);
   let latest: Record<string, unknown> | undefined;
   let asked: AskedQuestion | undefined;
-  for (let i = messages.length - 1; i >= 0; i--) {
-    const message = messages[i];
-    if (message.role === "user") break;
-    if (message.role !== "assistant") continue; // tool results and system sections
-    latest ??= message;
-    asked ??= assistantTurn(message).question;
+  scan: for (let e = entries.length - 1; e >= 0; e--) {
+    const messages = (entries[e].model ?? []) as Record<string, unknown>[];
+    for (let i = messages.length - 1; i >= 0; i--) {
+      const message = messages[i];
+      if (message.role === "user") break scan;
+      if (message.role !== "assistant") continue; // tool results and system sections
+      latest ??= message;
+      const question = asked ? undefined : assistantTurn(message).question;
+      if (question) asked = { ...question, id: entries[e].id };
+    }
   }
   const failed = latest?.stopReason === "error";
   return { ...(asked ? { question: asked } : {}), failed, finished: Boolean(latest) && !failed && latest!.stopReason !== "aborted" };

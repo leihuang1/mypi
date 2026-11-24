@@ -12,6 +12,7 @@ import {
   InboxDoc,
   ROOT_CONVERSATION_ID,
   type HarnessInspection,
+  type EntryId,
   type Storage,
   type SubmissionId,
   type SubmissionRecord,
@@ -60,7 +61,7 @@ import type {
 } from "@mypi/shared";
 import { headline, NotificationService } from "./notification-service.js";
 import type { LoadedModelsConfig } from "./auth-loader.js";
-import { AskUserExtension, conversationState, lastReply } from "./extensions/ask-user.js";
+import { askUserExtension, conversationState, lastReply } from "./extensions/ask-user.js";
 import { agentShellEnv, GuardExtension } from "./extensions/guard.js";
 import { createPiCompatExtension } from "./extensions/pi-compat.js";
 import { changeStats, inspectGitDirectory, noGitStatus } from "./git-service.js";
@@ -134,25 +135,33 @@ function suggestedMessage(meta: CatalogEntry, reply: string | undefined): string
 }
 
 /**
- * The input the session's status is about: the latest one since the last reset, skipping one withdrawn before it ran.
- * Read from the durable records, so a retried request, a lost catalog save or an old catalog can't move it.
+ * The input the session's status is about: the one placed last in the transcript, unless a reset came after it.
+ * By entry, not submission id: a steer is placed before an older follow-up, and a reset before older queued input.
+ * Inputs never placed (queued, or withdrawn first) never ran. Read from the durable records, so a retried request, a
+ * lost catalog save or an old catalog can't move it.
  */
 async function latestInput(storage: Storage, conversationId: Conversation["id"]): Promise<SubmissionRecord | undefined> {
+  let latest: (SubmissionRecord & { entry: number }) | undefined;
+  const writes: number[] = [];
   let cursor: Parameters<Storage["scanSubmissions"]>[2];
   do {
-    const page = await storage.scanSubmissions({ conversationId, order: "descending" }, 32, cursor, BACKGROUND_CONTEXT);
+    const page = await storage.scanSubmissions({ conversationId, order: "descending" }, 256, cursor, BACKGROUND_CONTEXT);
     for (const record of page.items) {
-      if (record.type === "write") {
-        const reset = record.status === "done" &&
-          (await storage.entry(conversationId, record.entry, BACKGROUND_CONTEXT))?.entry.kind === "pi.reset";
-        if (reset) return undefined;
-      } else if (!(record.status === "unanswered" && record.reason === "aborted" && !record.entry)) {
-        return record;
+      if (record.entry === undefined) continue;
+      if (record.type === "input") {
+        if (!latest || record.entry > latest.entry) latest = record as SubmissionRecord & { entry: number };
+      } else if (record.status === "done") {
+        writes.push(record.entry);
       }
     }
     cursor = page.next;
   } while (cursor);
-  return undefined;
+  if (!latest) return undefined;
+  // Writes placed after it: a reset among them starts a context it isn't in. (Compactions are writes too.)
+  for (const entry of writes.filter((e) => e > latest!.entry)) {
+    if ((await storage.entry(conversationId, entry as EntryId, BACKGROUND_CONTEXT))?.entry.kind === "pi.reset") return undefined;
+  }
+  return latest;
 }
 
 const DEFAULT_SYSTEM_INSTRUCTIONS = [
@@ -661,7 +670,8 @@ export class HarnessManager {
       registry.install(CodingTools);
       registry.install(createPiCompatExtension({ ponytail: () => meta.ponytail !== false }));
       registry.install(GuardExtension);
-      registry.install(AskUserExtension);
+      let opened: Harness | undefined;
+      registry.install(askUserExtension(() => opened));
 
       const storage = await openNodeSqliteStorage(dbPath);
       const harness = await Harness.open(
@@ -676,6 +686,7 @@ export class HarnessManager {
         },
         BACKGROUND_CONTEXT,
       );
+      opened = harness;
 
       const root = await harness.root(BACKGROUND_CONTEXT, {
         agent: {

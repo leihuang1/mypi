@@ -84,6 +84,19 @@ it("counts every changed file for a notice, binary, empty and mode-only ones too
     write("big.txt", "x\n".repeat(600_000));
     assert.deepEqual(await changeStats(cwd), { files: 6, additions: 4, deletions: 1, partial: true });
 
+    // A file that can be listed but not read (its folder can't be searched): its lines are unknown, not zero.
+    fs.rmSync(path.join(cwd, "big.txt"));
+    fs.mkdirSync(path.join(cwd, "locked"));
+    write("locked/notes.txt", "one\ntwo\n");
+    fs.chmodSync(path.join(cwd, "locked"), 0o400);
+    try {
+      assert.equal((await changeStats(cwd)).partial, true);
+    } finally {
+      fs.chmodSync(path.join(cwd, "locked"), 0o755);
+      fs.rmSync(path.join(cwd, "locked"), { recursive: true });
+    }
+    write("big.txt", "x\n");
+
     // The agent started an unrelated history: no comparison with the session's base, rather than "no changes".
     const start = git("rev-parse", "HEAD").toString().trim();
     fs.rmSync(path.join(cwd, "big.txt"));

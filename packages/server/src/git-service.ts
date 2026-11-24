@@ -137,6 +137,7 @@ export async function changeStats(cwd: string, baseRef?: string, baseCommit?: st
     stats.files++;
     const full = path.join(repoRoot, file);
     const info = await fs.lstat(full).catch(() => undefined);
+    if (!info) stats.partial = true; // unreadable, or gone since it was listed: its lines are unknown, not zero
     if (!info?.isFile()) continue;
     if (info.size > COUNT_FILE_BYTES || info.size > budget) {
       stats.partial = true;
