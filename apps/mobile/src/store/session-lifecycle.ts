@@ -8,6 +8,8 @@ export type AppScreenName =
 
 export interface FailedSubmissionDraft extends SendMessageRequest {
   error: string;
+  /** The question this message answered, kept for a Retry: by then the agent may be asking another. */
+  answers?: number;
 }
 
 // Restore is an explicit edit/new submission; Retry preserves the original request ID.

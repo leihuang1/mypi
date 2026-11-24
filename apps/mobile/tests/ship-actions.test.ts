@@ -31,16 +31,19 @@ function screen(client: Record<string, unknown>, session: Record<string, unknown
     getSessionView: (key: string) => views[key] ?? {},
     persistSessionViews: async () => {},
   };
-  for (const name of ["topSheet", "shipPreview", "shipMessage", "controlBusy", "sending", "failedDraft"]) {
+  for (const name of ["shipPreview", "shipMessage", "controlBusy", "sending", "failedDraft"]) {
     state[`set${name[0].toUpperCase()}${name.slice(1)}`] = (value: unknown) => {
       state[name] = typeof value === "function" ? (value as (prev: unknown) => unknown)(state[name]) : value;
     };
   }
+  // The screen's setTopSheet wraps the state setter; its ref follows the state, as it would across renders.
+  state.setTopSheetState = (value: unknown) => { state.topSheet = value; };
+  state.topSheetRef = Object.defineProperty({}, "current", { get: () => state.topSheet, set: (v) => { state.topSheet = v; } });
   state.setConnError = (value: unknown) => { state.error = value; };
   const handlers = loadScreenHandlers(
     new URL("../src/screens/SessionDetailScreen.tsx", import.meta.url),
-    ["claimControl", "releaseControl", "applySummary", "appliedLocally", "refreshSummary", "openPr", "submitMessage",
-      "openShip", "handleShip", "handleArchive", "handleAnswer"],
+    ["claimControl", "releaseControl", "setTopSheet", "applySummary", "appliedLocally", "refreshSummary", "openPr",
+      "submitMessage", "handleRetryFailedDraft", "openShip", "handleShip", "handleArchive", "handleAnswer"],
     state,
   );
   return { state: handlers, alerts, updates, opened, sent };
@@ -108,7 +111,7 @@ it("archives at once when there's no work, and asks first when there is", async 
 });
 
 it("answers the agent's question with the chosen text, and the question goes once it's sent", async () => {
-  const { state, sent, updates } = screen({}, { id: "s1", updatedAt: 1, status: "needs_you", question: { text: "Tabs?", choices: ["tabs"] } });
+  const { state, sent, updates } = screen({}, { id: "s1", updatedAt: 1, status: "needs_you", question: { text: "Tabs?", choices: ["tabs"], id: 5 } });
   await state.handleAnswer("tabs");
   assert.deepEqual(plain(sent.map((r) => [r.content, r.whenBusy])), [["tabs", "steer"]]);
   assert.deepEqual([updates.at(-1).status, updates.at(-1).question], ["running", undefined], "no stale chips at the next run_end");
@@ -165,17 +168,33 @@ it("closes the Ship sheet when its preview can't be read", async () => {
 });
 
 it("keeps an answered question gone and a newer one shown, in whatever order summaries arrive", async () => {
-  const asked = { id: "s1", updatedAt: 1, status: "needs_you", question: { text: "Tabs?", choices: ["tabs"] } };
+  const asked = { id: "s1", updatedAt: 1, status: "needs_you", question: { text: "Tabs?", choices: ["tabs"], id: 5 } };
 
   // The agent asked the next question before the answer's response arrived: that question stays.
   let ack!: () => void;
   const late = screen({ sendMessage: () => new Promise<void>((resolve) => { ack = resolve; }) }, asked);
   const answering = late.state.handleAnswer("tabs");
   await tick();
-  late.state.applySummary({ id: "s1", updatedAt: 2, status: "needs_you", question: { text: "Deploy now?" } });
+  late.state.applySummary({ id: "s1", updatedAt: 2, status: "needs_you", question: { text: "Deploy now?", id: 9 } });
   ack();
   await answering;
   assert.equal(late.updates.at(-1).question?.text, "Deploy now?");
+
+  // The answer's response was lost, and by the Retry the agent asks the next question: the Retry answered the first.
+  let lost = true;
+  const retry = screen({ sendMessage: async () => { if (lost) { lost = false; throw new Error("network"); } } }, asked);
+  await retry.state.handleAnswer("tabs");
+  assert.equal(retry.state.failedDraft.answers, 5, "kept with the draft");
+  retry.state.applySummary({ id: "s1", updatedAt: 2, status: "needs_you", question: { text: "Deploy now?", id: 9 } });
+  await retry.state.handleRetryFailedDraft();
+  assert.deepEqual([retry.updates.at(-1).status, retry.updates.at(-1).question?.text], ["needs_you", "Deploy now?"]);
+
+  // A read from before the daemon took the answer, stamped as late as the answer, arriving after the run's own
+  // summary: it still shows the answered question, so its chips stay gone.
+  const read = screen({}, asked);
+  await read.state.handleAnswer("tabs");
+  read.state.applySummary({ id: "s1", updatedAt: 3, status: "done" });
+  assert.equal(read.state.applySummary({ ...asked, updatedAt: 3 })?.question, undefined);
 
   // A snapshot from before the answer arrives after it: its question isn't brought back.
   const { state, updates } = screen({}, asked);
@@ -215,13 +234,16 @@ it("reads the summary again when a read fails, and says so when it keeps failing
   assert.match(String(state.error), /读不到会话的最新状态/);
 });
 
-it("ignores the preview of a Ship sheet that was closed", async () => {
-  const pending = deferred<ShipPreview>();
-  const { state } = screen({ getShipPreview: () => pending.promise });
-  const opening = state.openShip();
-  await state.openShip(); // closes it
-  state.topSheet = "rename";
-  pending.reject(new Error("timeout"));
-  await opening;
-  assert.deepEqual([state.topSheet, state.error], ["rename", null]);
+it("ignores the preview of a Ship sheet that was closed, however it was closed", async () => {
+  for (const close of ["pill", "✕", "other sheet"]) {
+    const pending = deferred<ShipPreview>();
+    const { state } = screen({ getShipPreview: () => pending.promise });
+    const opening = state.openShip();
+    if (close === "pill") await state.openShip();
+    else state.setTopSheet(close === "✕" ? null : "rename");
+    if (close !== "other sheet") state.setTopSheet("rename");
+    pending.reject(new Error("timeout"));
+    await opening;
+    assert.deepEqual([state.topSheet, state.error], ["rename", null], close);
+  }
 });

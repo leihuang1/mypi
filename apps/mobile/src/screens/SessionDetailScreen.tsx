@@ -233,9 +233,17 @@ export function SessionDetailScreen({
   // Separated Top Popovers:
   // - "rename": tapped top session title -> rename session or jump to CWD
   // - "compact" | "reset" | "usage": tapped telemetry bar / compact / reset icons
-  const [topSheet, setTopSheet] = useState<
+  const [topSheet, setTopSheetState] = useState<
     "rename" | "usage" | "compact" | "reset" | "ship" | null
   >(null);
+  const topSheetRef = useRef(topSheet);
+  /** Leaving the Ship sheet any way (✕, another sheet, an archive) drops its pending preview, at once. */
+  const setTopSheet = (next: typeof topSheet | ((prev: typeof topSheet) => typeof topSheet)) => {
+    const value = typeof next === "function" ? next(topSheetRef.current) : next;
+    if (topSheetRef.current === "ship" && value !== "ship") previewGenRef.current++;
+    topSheetRef.current = value;
+    setTopSheetState(value);
+  };
 
   // Bottom Composer Quick Tray:
   // - "actions": tapped ＋ button -> quick action grid
@@ -259,9 +267,9 @@ export function SessionDetailScreen({
   sessionRef.current = session;
   const summaryGenRef = useRef(0);
   const lastSummaryAtRef = useRef(0);
-  // The question answered here, and the summary's updatedAt when it was shown: a summary no newer than that (a
-  // snapshot or read from before the daemon took the answer) mustn't bring its chips back.
-  const answeredRef = useRef<{ text: string; updatedAt: number } | null>(null);
+  // The question the daemon took an answer to, by id: a summary still showing it (a snapshot or read from before the
+  // daemon took the answer) mustn't bring its chips back. A newer question has another id.
+  const answeredRef = useRef<number | null>(null);
 
   // Quick @-mention inline directory browser state
   const [quickBrowsePath, setQuickBrowsePath] = useState<string>(session.cwd);
@@ -299,7 +307,7 @@ export function SessionDetailScreen({
   const applySummary = (incoming: SessionSummary): SessionSummary | undefined => {
     if (incoming.id !== sessionRef.current.id || incoming.updatedAt < sessionRef.current.updatedAt) return undefined;
     const answered = answeredRef.current;
-    const updated = answered && incoming.question?.text === answered.text && incoming.updatedAt <= answered.updatedAt
+    const updated = answered !== null && incoming.question?.id === answered
       ? { ...incoming, status: "running" as const, question: undefined }
       : incoming;
     // Now, not at the next render: a second summary in the same batch is compared with this one.
@@ -472,12 +480,11 @@ export function SessionDetailScreen({
     };
   }, [bottomTray, quickBrowsePath, activeCwd, client]);
 
-  const submitMessage = async (request: SendMessageRequest) => {
+  /** `answers`: the question this message answers, taken when it was first sent (a Retry keeps it). */
+  const submitMessage = async (request: SendMessageRequest, answers: number | undefined) => {
     const targetSessionId = session.id;
-    const shown = sessionRef.current;
-    const answered = shown.question ? { question: shown.question, updatedAt: shown.updatedAt } : undefined;
     setSending(true);
-    const pending = { ...request, error: "发送结果尚未确认" };
+    const pending = { ...request, answers, error: "发送结果尚未确认" };
     saveSessionView(viewKey, { failedDraft: pending });
     let persisted = false;
     try {
@@ -488,10 +495,13 @@ export function SessionDetailScreen({
       await client.sendMessage(targetSessionId, request);
       if (getSessionView(viewKey).failedDraft !== pending) return;
       saveSessionView(viewKey, { failedDraft: null });
-      // Answered: that question goes, unless a newer summary came meanwhile (the agent may have asked the next one).
-      if (answered && mountedRef.current && currentSessionIdRef.current === targetSessionId) {
-        answeredRef.current = { text: answered.question.text, updatedAt: answered.updatedAt };
-        if (sessionRef.current.question?.text === answered.question.text) applySummary(sessionRef.current);
+      // Answered: that question goes wherever it still shows, and the summary is read again. A newer question stays.
+      if (answers !== undefined && mountedRef.current && currentSessionIdRef.current === targetSessionId) {
+        answeredRef.current = answers;
+        if (sessionRef.current.question?.id === answers) {
+          applySummary(sessionRef.current);
+          refreshSummary();
+        }
       }
       if (mountedRef.current && currentSessionIdRef.current === targetSessionId) {
         setFailedDraft(null);
@@ -501,10 +511,10 @@ export function SessionDetailScreen({
       if (getSessionView(viewKey).failedDraft !== pending) return;
       const detail = err instanceof Error ? err.message : String(err);
       const error = persisted ? detail : `无法保存消息，本次未发送。请检查设备存储后重试：${detail}`;
-      saveSessionView(viewKey, { failedDraft: { ...request, error } });
+      saveSessionView(viewKey, { failedDraft: { ...request, answers, error } });
       if (mountedRef.current && currentSessionIdRef.current === targetSessionId) {
         // A lost response does not mean the server rejected this request.
-        setFailedDraft({ ...request, error });
+        setFailedDraft({ ...request, answers, error });
         setConnError(error);
       }
     } finally {
@@ -524,13 +534,13 @@ export function SessionDetailScreen({
     isNearBottomRef.current = true;
     updateInputText("");
     setBottomTray(null);
-    await submitMessage({ requestId, content, whenBusy });
+    await submitMessage({ requestId, content, whenBusy }, sessionRef.current.question?.id);
   };
 
   const handleRetryFailedDraft = async () => {
     if (!failedDraft || sending) return;
-    const { error, ...request } = failedDraft;
-    await submitMessage(request);
+    const { error, answers, ...request } = failedDraft;
+    await submitMessage(request, answers);
   };
 
   const handleDismissFailedDraft = () => {
@@ -728,7 +738,7 @@ export function SessionDetailScreen({
     if (sending || failedDraft) return;
     const requestId = `mobile-${session.id}-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
     isNearBottomRef.current = true;
-    await submitMessage({ requestId, content: answer, whenBusy: "steer" });
+    await submitMessage({ requestId, content: answer, whenBusy: "steer" }, sessionRef.current.question?.id);
   };
 
   const handleMentionPath = (mentionToken: string) => {
