@@ -312,6 +312,71 @@ it("loses nothing written after the count: late files go to trash, a late commit
   assert.equal((await withShim(() => removeSessionWorktree(wt5))).branchDeleted, false);
   assert.equal(git(repo, "log", "-1", "--format=%s", wt5.branch), "later");
 
+  // A commit on a detached HEAD at the last moment, just before git's metadata for the worktree is moved aside: the
+  // HEAD is read after that, so the commit gets its recovery branch.
+  const wt6 = (await createSessionWorktree(repo, root, "l6"))!;
+  git(wt6.path, "checkout", "-q", "--detach");
+  late("--git-common-dir", `cd "${wt6.path}" && echo d > d.txt && /usr/bin/git add d.txt && /usr/bin/git commit -qm "detached late"`);
+  assert.equal((await withShim(() => removeSessionWorktree(wt6))).removed, true);
+  assert.equal(git(repo, "log", "-1", "--format=%s", `${wt6.branch}-detached`), "detached late");
+
+  // The branch checked out in the owner's checkout just before it would be deleted: git refuses, and it stays.
+  const wt7 = (await createSessionWorktree(repo, root, "l7"))!;
+  late("merge-base --is-ancestor", `cd "${repo}" && /usr/bin/git checkout -q ${wt7.branch}`);
+  assert.equal((await withShim(() => removeSessionWorktree(wt7))).branchDeleted, false);
+  assert.equal(git(repo, "rev-parse", "--abbrev-ref", "HEAD"), wt7.branch, "the owner's checkout still has its branch");
+  git(repo, "checkout", "-q", "-");
+
+  // A folder made again at the old path after the move: nothing to roll back, and its file is left alone.
+  const wt8 = (await createSessionWorktree(repo, root, "l8"))!;
+  late("merge-base --is-ancestor", `mkdir -p "${wt8.path}" && echo new > "${wt8.path}/new.txt"`);
+  assert.equal((await withShim(() => removeSessionWorktree(wt8))).removed, true);
+  assert.equal(fs.readFileSync(path.join(wt8.path, "new.txt"), "utf8"), "new\n");
+
+  // Staged just after the count, its file then deleted: the content is only in the index, which is kept with the
+  // worktree's moved-aside metadata.
+  const wt11 = (await createSessionWorktree(repo, root, "l11"))!;
+  late("status --porcelain", `cd "${wt11.path}" && echo staged > s.txt && /usr/bin/git add s.txt && unlink s.txt`);
+  assert.equal((await withShim(() => removeSessionWorktree(wt11))).removed, true);
+  const retiredRoot = path.join(repo, ".git", "mypi-retired");
+  const retired = fs.readdirSync(retiredRoot).find((name) => name.startsWith(path.basename(wt11.path)))!;
+  const staged = execFileSync("git", ["ls-files", "--cached"], {
+    cwd: repo, encoding: "utf8", env: { ...process.env, GIT_INDEX_FILE: path.join(retiredRoot, retired, "index") },
+  });
+  assert.match(staged, /^s\.txt$/m);
+
+  // The catalog's path is now a symlink to where the checkout was moved: the checkout itself goes to trash.
+  const wt10 = (await createSessionWorktree(repo, root, "l10"))!;
+  const movedTo = path.join(dir, "moved-l10");
+  git(repo, "worktree", "move", wt10.path, movedTo);
+  fs.symlinkSync(movedTo, wt10.path);
+  late("status --porcelain", `echo late > "${movedTo}/late.txt"`);
+  assert.equal((await withShim(() => removeSessionWorktree(wt10))).removed, true);
+  const entry = fs.readdirSync(path.join(dir, ".trash")).find((name) => name.startsWith("moved-l10-"))!;
+  assert.equal(fs.readFileSync(path.join(dir, ".trash", entry, "late.txt"), "utf8"), "late\n");
+
+  // Two missing worktrees with this folder name, and a spelling that no longer resolves: an error, not "nothing".
+  const wt12 = (await createSessionWorktree(repo, root, "l12"))!;
+  git(repo, "worktree", "add", "-q", "--detach", path.join(dir, "elsewhere", path.basename(wt12.path)));
+  fs.renameSync(wt12.path, path.join(dir, "gone-1"));
+  fs.renameSync(path.join(dir, "elsewhere"), path.join(dir, "gone-2"));
+  const unresolvable = { ...wt12, path: path.join(dir, "no-such-link", path.basename(wt12.path)) };
+  await assert.rejects(worktreeWork(unresolvable), /Several missing worktrees/);
+
+  // Submodule repositories live in the worktree's git metadata: removing them could lose commits pushed nowhere, so
+  // the removal is refused, confirmed or not.
+  const sub = path.join(dir, "sub");
+  git(dir, "init", "-q", sub);
+  write(path.join(sub, "s.txt"), "s\n");
+  git(sub, "add", "-A");
+  git(sub, "commit", "-qm", "sub");
+  const wt9 = (await createSessionWorktree(repo, root, "l9"))!;
+  git(wt9.path, "-c", "protocol.file.allow=always", "submodule", "add", "-q", sub, "mod");
+  git(wt9.path, "commit", "-qm", "add mod");
+  const refused = await removeSessionWorktree(wt9, { force: true });
+  assert.deepEqual([refused.removed, /子模块/.test(refused.blocked ?? "")], [false, true]);
+  assert.ok(fs.existsSync(path.join(wt9.path, "mod", "s.txt")));
+
   // Trash older than a week is emptied by the next removal.
   const old = path.join(root, ".trash", `old-${Date.now() - 8 * 86_400_000}`);
   fs.mkdirSync(old);

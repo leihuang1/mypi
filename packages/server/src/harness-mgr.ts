@@ -1147,14 +1147,10 @@ export class HarnessManager {
           const result = await removeSessionWorktree(meta.worktree, { force, pushed: shippedHead(meta) });
           const { exists: _, ...found } = result.work;
           work = found;
-          if (!result.removed && !force) {
-            // Nothing to warn about, yet git kept it (locked): confirming wouldn't be about losing work.
-            if (work.uncommitted + work.ignored + work.unpushed === 0) {
-              throw new ConflictError("git 不让移除这个工作区（可能被 git worktree lock 锁住了），先在电脑上处理");
-            }
-            return { archived: false, ...work, session: await this.buildSessionSummary(meta) };
-          }
-          if (!result.removed) console.warn(`[mypi-server] Archived ${meta.id} but kept its locked worktree ${meta.worktree.path}`);
+          // Locked, or holding submodule repositories: no confirmation makes removing it safe.
+          if (result.blocked) throw new ConflictError(result.blocked);
+          if (!result.removed && !force) return { archived: false, ...work, session: await this.buildSessionSummary(meta) };
+          if (!result.removed) console.warn(`[mypi-server] Archived ${meta.id} but kept ${meta.worktree.path}: git doesn't know it as this worktree`);
         }
         meta.archivedAt = Date.now();
         meta.updatedAt = meta.archivedAt;

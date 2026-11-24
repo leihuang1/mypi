@@ -184,6 +184,8 @@ async function registration(worktree: SessionWorktree): Promise<{ head?: string;
   // same folder name, which carries the session id.
   if (fs.existsSync(target)) return undefined;
   const named = entries.filter((e) => e.dir && path.basename(e.dir) === path.basename(target) && !fs.existsSync(e.dir));
+  // More than one: can't tell which is this session's, and "none" would read as nothing there to keep.
+  if (named.length > 1) throw new Error(`Several missing worktrees are named ${path.basename(target)}: can't tell which is ${target}`);
   return named.length === 1 ? { head: named[0].head, dir: named[0].dir! } : undefined;
 }
 
@@ -239,60 +241,89 @@ function emptyTrash(trash: string): void {
   }
 }
 
+/** The worktree's own metadata folder in the git dir (`worktrees/<name>`), found by the checkout path it records. */
+function metadataDir(commonDir: string, checkout: string): string | undefined {
+  const root = path.join(commonDir, "worktrees");
+  for (const name of fs.existsSync(root) ? fs.readdirSync(root) : []) {
+    const file = path.join(root, name, "gitdir");
+    const recorded = fs.existsSync(file) ? fs.readFileSync(file, "utf8").trim() : "";
+    if (recorded && path.dirname(path.resolve(root, name, recorded)) === path.resolve(checkout)) return path.join(root, name);
+  }
+  return undefined;
+}
+
 /**
  * Remove the worktree when it holds nothing uncommitted, ignored or unpushed, or when `force` (an Archive the user
  * confirmed) says to drop those files. Commits are never lost to it:
- * - the branch is deleted only when the exact tip checked is in a commit known to be safe (`backedUp`), and only if
- *   it still points there, so a commit made meanwhile keeps it;
- * - commits on a detached HEAD are kept on `<branch>-detached`.
- * Without `force` the folder is moved to `.trash/` beside it rather than deleted, so a file written after the count
- * is still there for a week. A locked worktree stays. Throws, removing nothing, when the work can't be checked.
- * `pushed`: the head GitHub merged, if known.
+ * - git's metadata for the worktree is moved aside first, so nothing can be committed in it from then on, and the
+ *   HEAD read after that is final: commits on a detached HEAD are kept on `<branch>-detached`;
+ * - the branch is deleted only when the exact tip checked is in a commit known to be safe (`backedUp`), by
+ *   `branch -D`, which refuses a branch checked out anywhere; one that moved meanwhile is put back.
+ * A locked worktree, or one holding submodule repositories (their commits may exist nowhere else), is refused
+ * whatever `force` says: `blocked` says why. Without `force` the folder is moved to `.trash/` beside it, not
+ * deleted, so a file written after the count is there for a week. Throws, removing nothing, when the work can't be
+ * checked. `pushed`: the head GitHub merged, if known.
  */
 export async function removeSessionWorktree(
   worktree: SessionWorktree,
   options: { force?: boolean; pushed?: string } = {},
-): Promise<{ removed: boolean; branchDeleted: boolean; work: WorktreeWork }> {
+): Promise<{ removed: boolean; branchDeleted: boolean; work: WorktreeWork; blocked?: string }> {
   const gitDir = gitDirOf(worktree);
   const { work, disposable: regenerable } = await inspect(worktree, options.pushed);
-  const kept = { removed: false, branchDeleted: false, work };
-  if (!options.force && work.uncommitted + work.ignored + work.unpushed > 0) return kept;
+  const kept = (blocked?: string) => ({ removed: false, branchDeleted: false, work, ...(blocked ? { blocked } : {}) });
+  if (!options.force && work.uncommitted + work.ignored + work.unpushed > 0) return kept();
   const safe = [worktree.baseCommit, worktree.baseRef, options.pushed];
-  const ref = `refs/heads/${worktree.branch}`;
-  // The tip, read once: the branch is deleted below only if it still points here.
-  const tip = await git(gitDir, ["rev-parse", "--verify", "--quiet", `${ref}^{commit}`]).catch(() => "");
   const registered = await registration(worktree);
-  if (registered?.head && registered.head !== tip && !(await backedUp(gitDir, registered.head, safe)) &&
-    !(await git(gitDir, ["branch", "--contains", registered.head, "--format=%(refname)"]))) {
-    // Commits on a detached HEAD go with the worktree's HEAD: keep them on a branch of their own.
-    const taken = await hasRef(gitDir, `${ref}-detached`);
-    await git(gitDir, ["branch", `${worktree.branch}-detached${taken ? `-${registered.head.slice(0, 8)}` : ""}`, registered.head]);
-  }
+  if (!registered && work.exists) return kept(); // a folder git doesn't know as this worktree: not ours to delete
+  const checkout = registered?.dir ?? worktree.path;
+
+  let meta: string | undefined;
+  let retired: string | undefined;
   if (registered) {
-    const trashDir = path.join(path.dirname(worktree.path), ".trash");
-    let moved: string | undefined;
-    if (work.exists && !options.force) {
+    const common = await git(gitDir, ["rev-parse", "--path-format=absolute", "--git-common-dir"]);
+    meta = metadataDir(common, registered.dir);
+    if (!meta) throw new Error(`Can't find git's metadata for the worktree at ${registered.dir}`);
+    if (fs.existsSync(path.join(meta, "locked"))) return kept("git 不让移除这个工作区（它被 git worktree lock 锁住了），先在电脑上解锁");
+    if (fs.existsSync(path.join(meta, "modules"))) {
+      return kept("这个工作区里有子模块，它们的提交可能只在这里：请在电脑上处理后再移除");
+    }
+    retired = path.join(common, "mypi-retired", `${path.basename(meta)}-${Date.now()}`);
+    fs.mkdirSync(path.dirname(retired), { recursive: true });
+    fs.renameSync(meta, retired);
+  }
+  try {
+    const head = retired ? fs.readFileSync(path.join(retired, "HEAD"), "utf8").trim() : "";
+    if (/^[0-9a-f]{40}$/.test(head) && !(await backedUp(gitDir, head, safe)) &&
+      !(await git(gitDir, ["branch", "--contains", head, "--format=%(refname)"]))) {
+      const taken = await hasRef(gitDir, `refs/heads/${worktree.branch}-detached`);
+      await git(gitDir, ["branch", `${worktree.branch}-detached${taken ? `-${head.slice(0, 8)}` : ""}`, head]);
+    }
+    if (fs.existsSync(checkout) && options.force) {
+      fs.rmSync(checkout, { recursive: true, force: true });
+    } else if (fs.existsSync(checkout)) {
+      const trashDir = path.join(path.dirname(checkout), ".trash");
       fs.mkdirSync(trashDir, { recursive: true });
-      moved = path.join(trashDir, `${path.basename(worktree.path)}-${Date.now()}`);
-      fs.renameSync(worktree.path, moved);
-    }
-    // The folder is gone now (moved, or deleted by hand); only a confirmed removal deletes files itself.
-    // By the path git recorded, which may be spelled differently from the catalog's.
-    await git(gitDir, ["worktree", "remove", "--force", registered.dir]).catch(() => "");
-    if (await registration(worktree)) {
-      if (moved) fs.renameSync(moved, worktree.path); // locked: put it back
-      // Counted again: what's there now, not what was there before the attempt.
-      return { removed: false, branchDeleted: false, work: (await inspect(worktree, options.pushed)).work };
-    }
-    if (moved) {
+      const moved = path.join(trashDir, `${path.basename(checkout)}-${Date.now()}`);
+      fs.renameSync(checkout, moved);
       for (const p of regenerable) fs.rmSync(path.join(moved, p), { recursive: true, force: true });
       emptyTrash(trashDir);
     }
-  } else if (work.exists) {
-    return kept; // a folder git doesn't know as this worktree: not ours to delete
+  } catch (err) {
+    if (retired && meta) fs.renameSync(retired, meta); // the checkout is still there: so is its metadata
+    throw err;
   }
-  const elsewhere = (await git(gitDir, ["worktree", "list", "--porcelain", "-z"])).split("\0").includes(`branch ${ref}`);
-  if (!tip || elsewhere || !(await backedUp(gitDir, tip, safe))) return { removed: true, branchDeleted: false, work };
-  await git(gitDir, ["update-ref", "-d", ref, tip]).catch(() => "");
-  return { removed: true, branchDeleted: !(await hasRef(gitDir, ref)), work };
+  // The metadata stays (in mypi-retired/ in the git dir) for the same week as the trash: its index has what was
+  // staged, its logs the worktree's HEAD history.
+  if (retired) emptyTrash(path.dirname(retired));
+
+  const tip = await git(gitDir, ["rev-parse", "--verify", "--quiet", `refs/heads/${worktree.branch}^{commit}`]).catch(() => "");
+  if (!tip || !(await backedUp(gitDir, tip, safe))) return { removed: true, branchDeleted: false, work };
+  const out = await git(gitDir, ["-c", "core.abbrev=no", "branch", "-D", worktree.branch]).catch(() => "");
+  const was = /\(was ([0-9a-f]{40})\)/.exec(out)?.[1];
+  if (was && was !== tip) {
+    // It moved between the check and the delete: put it back, under another name if that's been taken since.
+    await git(gitDir, ["branch", worktree.branch, was])
+      .catch(() => git(gitDir, ["branch", `${worktree.branch}-moved-${was.slice(0, 8)}`, was]));
+  }
+  return { removed: true, branchDeleted: was === tip, work };
 }
