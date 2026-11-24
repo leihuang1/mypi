@@ -347,6 +347,8 @@ it("archives on request: warns about work first, keeps unpushed commits on the b
     git(repo, "worktree", "remove", foreign.worktreePath!);
     fs.mkdirSync(foreign.worktreePath!);
     fs.writeFileSync(path.join(foreign.worktreePath!, "mine.txt"), "mine\n");
+    // The Ship sheet, where Archive is, still opens: Ship can't go, and says why.
+    assert.match((await mgr.shipPreview(foreign.id)).reason ?? "", /不是这个会话的 git 工作区/);
     assert.equal((await mgr.archiveSession(foreign.id, {})).archived, true);
     assert.equal(fs.readFileSync(path.join(foreign.worktreePath!, "mine.txt"), "utf8"), "mine\n");
 

@@ -152,6 +152,9 @@ it("needs the user after a failure that leaves no reply, and when queued message
     release();
     await waitFor(async () => (await status(failing.id)) === "needs_you", "the stuck follow-up to be reported");
     assert.equal((await manager.getSessionSummary(failing.id)).busy, false, "a queue nothing will drain is not work");
+    // Sent again, as a Retry does: it was read before its run failed, and the reply says so.
+    const again = await manager.sendMessage(failing.id, { requestId: "f1", content: "go" });
+    assert.deepEqual([again.status, again.placed], ["unanswered", true]);
   } finally {
     await manager.close();
     fs.rmSync(root, { recursive: true, force: true });

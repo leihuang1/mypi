@@ -1058,6 +1058,7 @@ export class HarnessManager {
       submissionId: submission.id,
       requestId: req.requestId,
       status: statusRecord.status,
+      placed: statusRecord.entry !== undefined,
     };
   }
 

@@ -258,6 +258,8 @@ export interface SendMessageResponse {
   submissionId: number;
   requestId: string;
   status: string;
+  /** In the transcript: it was read, even if its run then failed (`unanswered`). Not placed and `unanswered`: withdrawn. */
+  placed?: boolean;
 }
 
 export interface ToolDiagnosticItem {

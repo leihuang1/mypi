@@ -336,7 +336,7 @@ it("loses nothing written after the count: late files go to trash, a late commit
 
   // The branch checked out in the owner's checkout in the moment between that check and the delete: it's put back.
   const wt15 = (await createSessionWorktree(repo, root, "l15"))!;
-  write(path.join(bin, "git"), `#!/bin/sh\ncase "$*" in *"update-ref -d"*) (cd "${repo}" && /usr/bin/git checkout -q ${wt15.branch});; esac\nexec /usr/bin/git "$@"\n`);
+  write(path.join(bin, "git"), `#!/bin/sh\ncase "$*" in *"--no-deref -d"*) (cd "${repo}" && /usr/bin/git checkout -q ${wt15.branch});; esac\nexec /usr/bin/git "$@"\n`);
   fs.chmodSync(path.join(bin, "git"), 0o755);
   assert.equal((await withShim(() => removeSessionWorktree(wt15))).branchDeleted, false);
   assert.equal(git(repo, "rev-parse", "--abbrev-ref", "HEAD"), wt15.branch);
@@ -487,13 +487,24 @@ it("puts git's metadata back after a failure before the move, even if git's gc r
   assert.ok(git(repo, "worktree", "list", "--porcelain").includes(wt.path));
 });
 
+it("never deletes through a symbolic ref: a session branch or an old ref that's an alias of main", async () => {
+  const { dir, repo } = fixture("symbolic");
+  const wt = (await createSessionWorktree(repo, path.join(dir, "worktrees"), "s1"))!;
+  git(repo, "symbolic-ref", `refs/heads/${wt.branch}`, "refs/heads/main");
+  git(repo, "symbolic-ref", `refs/mypi-retired/old-${Date.now() - 8 * 86_400_000}`, "refs/heads/main");
+  assert.equal((await removeSessionWorktree(wt)).branchDeleted, false);
+  assert.ok(hasBranch(repo, "main"), "main is still there");
+  assert.equal(git(repo, "rev-parse", "--abbrev-ref", "HEAD"), "main");
+  assert.equal(git(repo, "for-each-ref", "refs/mypi-retired/"), "", "the expired alias itself is gone");
+});
+
 it("says how to put back a commit made on the branch while it was being deleted", async () => {
   const { dir, repo } = fixture("root-commit");
   const wt = (await createSessionWorktree(repo, path.join(dir, "worktrees"), "c1"))!;
   const tip = git(repo, "rev-parse", wt.branch);
   // A checkout of it that was still under way when it was deleted, then a commit there: one without history.
   const bin = path.join(dir, "bin");
-  write(path.join(bin, "git"), `#!/bin/sh\n/usr/bin/git "$@"\nrc=$?\ncase "$*" in *"update-ref -d"*) cd "${repo}" && ` +
+  write(path.join(bin, "git"), `#!/bin/sh\n/usr/bin/git "$@"\nrc=$?\ncase "$*" in *"--no-deref -d"*) cd "${repo}" && ` +
     `/usr/bin/git symbolic-ref HEAD refs/heads/${wt.branch} && echo w > w.txt && /usr/bin/git add w.txt && /usr/bin/git commit -qm owner;; esac\nexit $rc\n`);
   fs.chmodSync(path.join(bin, "git"), 0o755);
   const warned: string[] = [];
@@ -556,7 +567,7 @@ it("keeps a detached commit and a moved branch in SHA-256 and reftable repositor
     const wt2 = (await createSessionWorktree(repo, root, "f2"))!;
     const bin = path.join(dir, "bin");
     const ref = `refs/heads/${wt2.branch}`;
-    write(path.join(bin, "git"), `#!/bin/sh\ncase "$*" in *"update-ref -d"*) cd "${repo}" && n=$(/usr/bin/git commit-tree -p ${ref} -m later "${ref}^{tree}") && /usr/bin/git update-ref ${ref} $n;; esac\nexec /usr/bin/git "$@"\n`);
+    write(path.join(bin, "git"), `#!/bin/sh\ncase "$*" in *"--no-deref -d"*) cd "${repo}" && n=$(/usr/bin/git commit-tree -p ${ref} -m later "${ref}^{tree}") && /usr/bin/git update-ref ${ref} $n;; esac\nexec /usr/bin/git "$@"\n`);
     fs.chmodSync(path.join(bin, "git"), 0o755);
     const savedPath = process.env.PATH;
     process.env.PATH = `${bin}:${savedPath}`;

@@ -262,9 +262,14 @@ async function expireStaged(gitDir: string): Promise<void> {
   for (const ref of refs.split("\n")) {
     const at = Number(/-(\d{13})$/.exec(ref)?.[1]);
     if (at && Date.now() - at > TRASH_DAYS * 86_400_000) {
-      await git(gitDir, ["update-ref", "-d", ref]).catch((err) => console.warn(`[mypi-server] Couldn't delete ${ref}: ${firstLine(err)}`));
+      await git(gitDir, ["update-ref", "--no-deref", "-d", ref]).catch((err) => console.warn(`[mypi-server] Couldn't delete ${ref}: ${firstLine(err)}`));
     }
   }
+}
+
+/** Whether git knows the session's folder as its worktree: a folder put at its path since isn't. */
+export async function isSessionWorktree(worktree: SessionWorktree): Promise<boolean> {
+  return (await registration(worktree)) !== undefined;
 }
 
 /** The worktree's own metadata folder in the git dir (`worktrees/<name>`), found by the checkout path it records. */
@@ -402,13 +407,15 @@ export async function removeSessionWorktree(
   await expireStaged(gitDir);
 
   const ref = `refs/heads/${worktree.branch}`;
+  // An alias of another branch (a symbolic ref) isn't the session's branch: deleting it isn't ours to do.
+  if (await git(gitDir, ["symbolic-ref", "-q", ref]).then(() => true, () => false)) return { removed: true, branchDeleted: false, work };
   const tip = await git(gitDir, ["rev-parse", "--verify", "--quiet", `${ref}^{commit}`]).catch(() => "");
   if (!tip || !(await backedUp(gitDir, tip, safe))) return { removed: true, branchDeleted: false, work };
   const checkedOut = async () =>
     (await git(gitDir, ["worktree", "list", "--porcelain", "-z"]).catch(() => `branch ${ref}`)).split("\0").includes(`branch ${ref}`);
   if (await checkedOut()) return { removed: true, branchDeleted: false, work };
   // Only if it still points at the tip checked: a commit made meanwhile keeps it.
-  await git(gitDir, ["update-ref", "-d", ref, tip]).catch(() => "");
+  await git(gitDir, ["update-ref", "--no-deref", "-d", ref, tip]).catch(() => "");
   const now = await git(gitDir, ["rev-parse", "--verify", "--quiet", `${ref}^{commit}`]).catch(() => "");
   if (now) {
     // Kept, or made again meanwhile by a commit in a checkout of it that was still under way: a commit with no branch

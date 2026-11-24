@@ -4,7 +4,7 @@ import os from "node:os";
 import { promisify } from "node:util";
 import type { PullRequestInfo } from "@mypi/shared";
 import { ConflictError } from "./errors.js";
-import { gitEnv, networkEnv as gitNetworkEnv, type SessionWorktree, worktreeWork } from "./worktree-service.js";
+import { gitEnv, isSessionWorktree, networkEnv as gitNetworkEnv, type SessionWorktree, worktreeWork } from "./worktree-service.js";
 
 // The owner's hooks don't run for Ship: --no-verify skips pre-commit and pre-push, but not prepare-commit-msg (which
 // can rewrite the message the user approved) or post-commit (an auto-sync hook would push past Ship's rule).
@@ -106,6 +106,7 @@ async function destination(cwd: string): Promise<{ repo?: string; problem?: stri
 export async function shipState(worktree: SessionWorktree, openPr?: string): Promise<ShipState> {
   const none = { uncommitted: 0, unpushed: 0, ahead: 0 };
   if (!fs.existsSync(worktree.path)) return { problem: "这个会话的工作区已经不在了", ...none };
+  if (!(await isSessionWorktree(worktree))) return { problem: "这个文件夹已经不是这个会话的 git 工作区了，无法发布", ...none };
   const cwd = worktree.path;
   const { uncommitted } = await worktreeWork(worktree);
   const base = [worktree.baseRef, worktree.baseCommit];
