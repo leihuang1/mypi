@@ -12,7 +12,9 @@ import {
   InboxDoc,
   ROOT_CONVERSATION_ID,
   type HarnessInspection,
+  type Storage,
   type SubmissionId,
+  type SubmissionRecord,
   watchEvents,
 } from "@earendil-works/pi-durable";
 import { NodeExecutionEnv } from "@earendil-works/pi-durable/env/node";
@@ -56,7 +58,7 @@ import type {
   UpdateBookmarkResponse,
   UpdateSessionRequest,
 } from "@mypi/shared";
-import { NotificationService } from "./notification-service.js";
+import { headline, NotificationService } from "./notification-service.js";
 import type { LoadedModelsConfig } from "./auth-loader.js";
 import { AskUserExtension, conversationState, lastReply } from "./extensions/ask-user.js";
 import { agentShellEnv, GuardExtension } from "./extensions/guard.js";
@@ -80,12 +82,15 @@ interface CatalogEntry {
   worktree?: SessionWorktree;
   /** The draft PR Ship opened; when it last shipped, and the commit it pushed. */
   /** `input`: the last message sent when it was shipped; a message after it means new work. */
-  pr?: PullRequestInfo & { shippedAt: number; head?: string; input?: number; mergedHead?: string };
+  /**
+   * `input`: the latest input when it shipped, null before any. Absent in catalogs from before it was recorded, which
+   * never read as shipped: whether later input went out is unknown.
+   */
+  pr?: PullRequestInfo & { shippedAt: number; head?: string; input?: number | null; mergedHead?: string };
   /** Archived by the user, or after the PR was merged or closed. Read-only from then on. */
   archivedAt?: number;
   /** When the user last sent a message: work after the last Ship means the session isn't "shipped" any more. */
   /** The submission of the last message sent, for its outcome. Cleared by reset. */
-  lastInput?: number;
   createdAt: number;
   updatedAt: number;
 }
@@ -98,6 +103,7 @@ interface CatalogData {
 
 interface ManagedSession {
   meta: CatalogEntry;
+  storage: Storage;
   harness: Harness;
   root: Conversation;
   submissionTexts: Map<number, string>;
@@ -124,8 +130,29 @@ function assertWritable(meta: CatalogEntry): void {
 
 /** The commit message and PR title Ship suggests: the first line of the agent's last reply. */
 function suggestedMessage(meta: CatalogEntry, reply: string | undefined): string {
-  const line = reply?.split("\n").map((l) => l.replace(/^[\s#>*-]+|\*\*/g, "").trim()).find(Boolean);
-  return (line || meta.name).slice(0, 200);
+  return (headline(reply) || meta.name).slice(0, 200);
+}
+
+/**
+ * The input the session's status is about: the latest one since the last reset, skipping one withdrawn before it ran.
+ * Read from the durable records, so a retried request, a lost catalog save or an old catalog can't move it.
+ */
+async function latestInput(storage: Storage, conversationId: Conversation["id"]): Promise<SubmissionRecord | undefined> {
+  let cursor: Parameters<Storage["scanSubmissions"]>[2];
+  do {
+    const page = await storage.scanSubmissions({ conversationId, order: "descending" }, 32, cursor, BACKGROUND_CONTEXT);
+    for (const record of page.items) {
+      if (record.type === "write") {
+        const reset = record.status === "done" &&
+          (await storage.entry(conversationId, record.entry, BACKGROUND_CONTEXT))?.entry.kind === "pi.reset";
+        if (reset) return undefined;
+      } else if (!(record.status === "unanswered" && record.reason === "aborted" && !record.entry)) {
+        return record;
+      }
+    }
+    cursor = page.next;
+  } while (cursor);
+  return undefined;
 }
 
 const DEFAULT_SYSTEM_INSTRUCTIONS = [
@@ -687,6 +714,7 @@ export class HarnessManager {
 
       return {
         meta,
+        storage,
         harness,
         root,
         submissionTexts: new Map<number, string>(),
@@ -738,8 +766,7 @@ export class HarnessManager {
       // next one. So queued with nothing running is stuck, not running.
       const stuck = !busy && inspection.submissions.some((s) => s.status === "queued");
       // The last input's outcome, from the runtime: some failures (no model, a task fault) write no assistant message.
-      const last = meta.lastInput === undefined ? undefined
-        : await (await managed.harness.submission(meta.lastInput as SubmissionId, BACKGROUND_CONTEXT))?.status(BACKGROUND_CONTEXT);
+      const last = await latestInput(managed.storage, managed.root.id);
       const conversation = conversationState(ctxView.entries as unknown as RawEntryRecord[]);
       const failed = stuck || conversation.failed ||
         (last?.status === "unanswered" && last.reason !== "aborted" && last.reason !== "reset");
@@ -747,7 +774,7 @@ export class HarnessManager {
       const status: SessionStatus = meta.archivedAt ? "archived"
         : busy ? "running"
           : conversation.question || failed ? "needs_you"
-            : meta.pr?.state === "open" && meta.pr.input === meta.lastInput ? "shipped"
+            : meta.pr?.state === "open" && meta.pr.input === (last?.id ?? null) ? "shipped"
               : finished || meta.pr ? "done" : "idle";
 
       return {
@@ -994,8 +1021,6 @@ export class HarnessManager {
     );
 
     managed.submissionTexts.set(submission.id, req.content);
-    meta.lastInput = submission.id;
-    this.saveCatalog();
 
     const statusRecord = await submission.status(BACKGROUND_CONTEXT);
     return {
@@ -1033,7 +1058,8 @@ export class HarnessManager {
       const nothing = state.uncommitted + state.unpushed === 0 && !unfinished;
       const blocked = meta.archivedAt ? "会话已归档，只能查看"
         : this.claims.has(sessionId) ? `正在${this.claims.get(sessionId)}中`
-          : running(inspection) ? "Agent 还在工作，等它结束再发布" : undefined;
+          : this.admitting.has(sessionId) ? "会话正在更新，稍后再试"
+            : running(inspection) ? "Agent 还在工作，等它结束再发布" : undefined;
       const reason = blocked ?? state.problem ?? (nothing ? (pr ? "已发布，之后没有新的改动" : "还没有可以发布的改动") : undefined);
       return {
         ready: !reason,
@@ -1069,7 +1095,8 @@ export class HarnessManager {
         const body = [reply?.slice(0, 4000), `_Shipped by MyPi from session “${meta.name}”._`].filter(Boolean).join("\n\n");
         const existing = meta.pr?.state === "open" ? { url: meta.pr.url, number: meta.pr.number, state: meta.pr.state } : undefined;
         const result = await shipWorktree(meta.worktree, { message, body, existing });
-        meta.pr = { ...result.pr, shippedAt: Date.now(), head: result.head, input: meta.lastInput };
+        const input = (await latestInput(managed.storage, managed.root.id))?.id ?? null;
+        meta.pr = { ...result.pr, shippedAt: Date.now(), head: result.head, input };
         meta.updatedAt = meta.pr.shippedAt;
         this.saveCatalog();
         return { pr: result.pr, committed: result.committed, pushed: result.pushed, session: await this.buildSessionSummary(meta) };
@@ -1191,6 +1218,11 @@ export class HarnessManager {
       }
       return this.admit(meta, "压缩", async () => {
         const managed = await this.openManagedSession(meta);
+        // The question lives in the transcript: compaction could summarize its ask away, and the session would read done.
+        const ctxView = await managed.root.context(BACKGROUND_CONTEXT);
+        if (conversationState(ctxView.entries as unknown as RawEntryRecord[]).question) {
+          throw new ConflictError("Agent 在等你回答问题，回答后再压缩");
+        }
         const taskId = await managed.root.compact(
           req?.instructions?.trim() || undefined,
           BACKGROUND_CONTEXT,
@@ -1221,7 +1253,6 @@ export class HarnessManager {
           req?.handoff?.trim() || undefined,
           BACKGROUND_CONTEXT,
         );
-        delete meta.lastInput; // the new context hasn't run
         meta.updatedAt = Date.now();
         this.saveCatalog();
         return {

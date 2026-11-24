@@ -130,7 +130,7 @@ export interface ShipResponse {
   pr: PullRequestInfo;
   /** Ship made a commit of the uncommitted changes. */
   committed: boolean;
-  /** Ship pushed new commits; false when the branch was already on GitHub. */
+  /** The push changed GitHub's branch (new commits, or the branch recreated); false when it was already up to date. */
   pushed: boolean;
   session: SessionSummary;
 }

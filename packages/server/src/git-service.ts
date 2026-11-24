@@ -114,7 +114,7 @@ const COUNT_TOTAL_BYTES = 32 * 1024 * 1024;
  * The size of the changes, for a notice: every changed path, binary and mode-only ones too, from `--numstat` and the
  * untracked files' line counts, without building patches.
  */
-export async function changeStats(cwd: string, baseRef?: string, baseCommit?: string): Promise<{ files: number; additions: number; deletions: number }> {
+export async function changeStats(cwd: string, baseRef?: string, baseCommit?: string): Promise<{ files: number; additions: number; deletions: number; partial?: boolean }> {
   const repoRoot = (await runGit(cwd, ["rev-parse", "--show-toplevel"])).replace(/\n$/, "");
   const head = (await runGit(repoRoot, ["rev-parse", "--verify", "--quiet", "HEAD"])).trim();
   const merged = await mergeBase(repoRoot, head, baseRef, baseCommit);
@@ -125,7 +125,7 @@ export async function changeStats(cwd: string, baseRef?: string, baseCommit?: st
     runGit(repoRoot, ["diff", "--numstat", "-z", "--no-renames", "--no-ext-diff", "--no-textconv", "--ignore-submodules=all", base, "--"]),
     runGit(repoRoot, ["ls-files", "--others", "--exclude-standard", "-z"]),
   ]);
-  const stats = { files: 0, additions: 0, deletions: 0 };
+  const stats: { files: number; additions: number; deletions: number; partial?: boolean } = { files: 0, additions: 0, deletions: 0 };
   for (const record of numstat.split("\0").filter(Boolean)) {
     const [added, deleted] = record.split("\t");
     stats.files++;
@@ -137,9 +137,14 @@ export async function changeStats(cwd: string, baseRef?: string, baseCommit?: st
     stats.files++;
     const full = path.join(repoRoot, file);
     const info = await fs.lstat(full).catch(() => undefined);
-    if (!info?.isFile() || info.size > COUNT_FILE_BYTES || info.size > budget) continue;
+    if (!info?.isFile()) continue;
+    if (info.size > COUNT_FILE_BYTES || info.size > budget) {
+      stats.partial = true;
+      continue;
+    }
     budget -= info.size;
     const data = await fs.readFile(full).catch(() => undefined);
+    if (!data) stats.partial = true;
     if (!data?.length || data.includes(0)) continue;
     let lines = data.at(-1) === 0x0a ? 0 : 1;
     for (const byte of data) if (byte === 0x0a) lines++;

@@ -80,6 +80,9 @@ it("counts every changed file for a notice, binary, empty and mode-only ones too
     write("empty.txt", "");
     write("new.txt", "x\ny");
     assert.deepEqual(await changeStats(cwd), { files: 5, additions: 4, deletions: 1 });
+    // A text file past the per-file cap is counted as a file, and the line counts say they're short.
+    write("big.txt", "x\n".repeat(600_000));
+    assert.deepEqual(await changeStats(cwd), { files: 6, additions: 4, deletions: 1, partial: true });
   } finally {
     fs.rmSync(cwd, { recursive: true, force: true });
   }

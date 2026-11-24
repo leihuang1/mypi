@@ -12,7 +12,8 @@ import { startMyPiServer } from "../src/main.js";
 import { githubRepo } from "../src/ship.js";
 
 const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "mypi-ship-")));
-const remote = path.join(root, "remote.git");
+// The "GitHub" repo: a bare repo that a fake ssh serves as git@github.com:owner/repo.git.
+const remote = path.join(root, "github", "owner", "repo.git");
 const ghLog = path.join(root, "gh.log");
 const saved = { ...process.env };
 
@@ -24,10 +25,18 @@ const commit = (cwd: string, file: string, content: string, message = `edit ${fi
 };
 
 before(() => {
-  // origin is "https://github.com/owner/repo.git", which this config rewrites to a local bare repo.
-  fs.writeFileSync(path.join(root, "gitconfig"), `[url "${remote}"]\n\tinsteadOf = https://github.com/owner/repo.git\n`);
-  // A fake gh: logs its arguments, opens PR 7, and finds an existing PR only when one was "opened by hand".
+  // origin is "https://github.com/owner/repo.git", which this config sends over SSH, as many owners do. The fake ssh
+  // serves it from the local folder: the URL Ship checks is still github.com's.
+  fs.writeFileSync(path.join(root, "gitconfig"), `[url "git@github.com:"]\n\tinsteadOf = https://github.com/\n`);
   fs.mkdirSync(path.join(root, "bin"));
+  fs.writeFileSync(path.join(root, "bin", "fake-ssh"), [
+    "#!/bin/sh",
+    `[ "$1" = git@github.com ] || exit 1`,
+    "for last; do :; done", // "git-upload-pack 'owner/repo.git'"
+    `cd "${path.join(root, "github")}" && eval "exec git \${last#git-}"`,
+    "",
+  ].join("\n"), { mode: 0o755 });
+  // A fake gh: logs its arguments, opens PR 7, and finds an existing PR only when one was "opened by hand".
   fs.writeFileSync(path.join(root, "bin", "gh"), [
     "#!/bin/sh",
     `printf '%s\\n' "$*" >> "${ghLog}"`,
@@ -50,16 +59,17 @@ before(() => {
   Object.assign(process.env, {
     PATH: `${path.join(root, "bin")}:${process.env.PATH}`,
     GIT_CONFIG_GLOBAL: path.join(root, "gitconfig"), GIT_CONFIG_NOSYSTEM: "1",
-    // Local paths only: a URL that escaped the rewrite fails here instead of reaching github.com.
-    GIT_ALLOW_PROTOCOL: "file",
+    // Local paths, and SSH only through the fake: nothing can reach github.com.
+    GIT_ALLOW_PROTOCOL: "file:ssh", GIT_SSH_COMMAND: path.join(root, "bin", "fake-ssh"), GIT_SSH_VARIANT: "simple",
     GIT_AUTHOR_NAME: "t", GIT_AUTHOR_EMAIL: "t@example.com", GIT_COMMITTER_NAME: "t", GIT_COMMITTER_EMAIL: "t@example.com",
   });
   // The "GitHub" repo, with a main branch, for every test.
+  fs.mkdirSync(path.dirname(remote), { recursive: true });
   git(root, "init", "-q", "--bare", "-b", "main", remote);
   const seed = path.join(root, "seed");
   git(root, "clone", "-q", "https://github.com/owner/repo.git", seed);
   commit(seed, "README.md", "hello\n", "init");
-  git(seed, "push", "-q", "origin", "main");
+  git(seed, "push", "-q", "origin", "HEAD:main"); // an empty repo's clone over SSH doesn't learn its branch name
 });
 
 after(() => {
@@ -98,7 +108,7 @@ it("ships the session branch as a draft PR, updates it, and never force-pushes o
   git(root, "clone", "-q", "https://github.com/owner/repo.git", repo);
   const mainBefore = git(remote, "rev-parse", "main");
 
-  const mgr = manager(path.join(root, "data"));
+  let mgr = manager(path.join(root, "data"));
   try {
     const session = await mgr.createSession({ cwd: repo, name: "greeting" });
     const wt = session.worktreePath!;
@@ -134,6 +144,15 @@ it("ships the session branch as a draft PR, updates it, and never force-pushes o
     assert.deepEqual([again.pr.number, again.committed, again.pushed], [7, false, true]);
     assert.equal(ghCalls().filter((call) => call.startsWith("pr create")).length, 1);
     assert.equal(git(remote, "rev-parse", `refs/heads/${branch}`), git(wt, "rev-parse", "HEAD"));
+
+    // A catalog from before Ship recorded the input it shipped can't tell whether later input went out: done, not shipped.
+    await mgr.close();
+    const catalogPath = path.join(root, "data", "catalog.json");
+    const catalog = JSON.parse(fs.readFileSync(catalogPath, "utf8"));
+    delete catalog.sessions.find((s: { id: string }) => s.id === session.id).pr.input;
+    fs.writeFileSync(catalogPath, JSON.stringify(catalog));
+    mgr = manager(path.join(root, "data"));
+    assert.equal((await mgr.getSessionSummary(session.id)).status, "done");
 
     // Someone pushed to the PR branch on GitHub: Ship refuses instead of force-pushing.
     const other = path.join(root, "other");
@@ -194,7 +213,8 @@ it("explains why a session can't ship, over HTTP as a 409", async () => {
       assert.equal(res.status, 409);
       assert.equal(((await res.json()) as { error: { code: string } }).error.code, "conflict");
     }
-    for (const [route, body] of [["ship", "null"], ["ship", '{"message":42}'], ["archive", '{"force":"false"}'], ["archive", "null"]]) {
+    for (const [route, body] of [["ship", "null"], ["ship", '{"message":42}'], ["archive", '{"force":"false"}'], ["archive", "null"],
+      ["ship", "[]"], ["archive", "[]"], ["ship", '{"message":'], ["messages", "{not json"]]) {
       const session = (await client.listSessions())[0];
       const res = await fetch(`http://127.0.0.1:${running.port}/v1/sessions/${session.id}/${route}`, {
         method: "POST", headers: { Authorization: `Bearer ${running.token}` }, body,
@@ -333,6 +353,22 @@ it("pushes only the branch, only where fetch comes from, without hooks or half-d
     await assert.rejects(mgr.shipSession(session.id, {}), /推送地址和拉取地址不同/);
     git(repo, "config", "--unset", "remote.origin.pushurl");
 
+    // An insteadOf may change how origin is reached, not which repo: here it would push to a fork, or to a host alias
+    // that isn't GitHub, while the PR opens on owner/repo.
+    for (const target of ["git@github.com:owner/fork.git", "git@mypi-test-not-github:owner/repo.git"]) {
+      git(repo, "config", `url.${target}.insteadOf`, "https://github.com/owner/repo.git");
+      assert.match((await mgr.shipPreview(session.id)).reason!, /insteadOf 改写到了 owner\/repo 以外/);
+      await assert.rejects(mgr.shipSession(session.id, {}), /insteadOf 改写/);
+      git(repo, "config", "--remove-section", `url.${target}`);
+    }
+    assert.equal((await mgr.shipPreview(session.id)).ready, true, "the SSH rewrite to the same repo is fine");
+
+    // A cherry-pick of several commits, stopped after the first was resolved and committed by hand.
+    const sequencer = git(wt, "rev-parse", "--path-format=absolute", "--git-path", "sequencer");
+    fs.mkdirSync(sequencer);
+    assert.match((await mgr.shipPreview(session.id)).reason!, /cherry-pick 或 revert 序列/);
+    fs.rmSync(sequencer, { recursive: true });
+
     // An unresolved merge isn't committed.
     git(wt, "checkout", "-q", "-b", "side");
     commit(wt, "k.txt", "side\n");
@@ -404,6 +440,17 @@ it("finishes a Ship whose PR wasn't opened, adopts only an open PR, and holds ne
     const shipped = await shipping;
     assert.deepEqual([shipped.pr.number, shipped.pushed, shipped.session.status], [7, false, "shipped"]);
     assert.ok((await mgr.listSessions()).some((s) => s.id === session.id));
+
+    // GitHub deleted the branch; this clone's tracking ref still has it. Ship recreates it, and says it pushed.
+    git(remote, "update-ref", "-d", `refs/heads/${branch}`);
+    const again = await mgr.shipSession(session.id, { message: "n" });
+    assert.deepEqual([again.pushed, git(remote, "rev-parse", `refs/heads/${branch}`)], [true, git(wt, "rev-parse", "HEAD")]);
+
+    // A message being admitted holds Ship off in the preview too, as POST does.
+    const admitting = (mgr as unknown as { admitting: Map<string, number> }).admitting;
+    admitting.set(session.id, 1);
+    assert.equal((await mgr.shipPreview(session.id)).reason, "会话正在更新，稍后再试");
+    admitting.delete(session.id);
   } finally {
     for (const name of ["pr-fail", "pr-merged", "pr-wait", "release"]) flag(name, false);
     await mgr.close();
@@ -429,13 +476,16 @@ it("cleans up only what is safe: not while the agent works, not a closed PR's fo
     commit(working.worktreePath!, "w.txt", "w\n");
     await mgr.shipSession(working.id, { message: "w" });
     const gate = new Promise<void>((resolve) => { release = resolve; });
-    faux.setResponses([async () => { await gate; return fauxAssistantMessage("Done."); }]);
+    faux.setResponses([async () => { await gate; return fauxAssistantMessage("-5 degrees fixed\n\nDetails."); }]);
     await mgr.sendMessage(working.id, { requestId: "w1", content: "also" });
     flag("pr-state", "MERGED");
     await mgr.checkPullRequests();
     assert.ok(fs.existsSync(working.worktreePath!));
     await assert.rejects(mgr.archiveSession(working.id, { force: true }), /还在工作/);
     release();
+    for (let i = 0; i < 500 && (await mgr.getSessionSummary(working.id)).busy; i++) await new Promise((r) => setTimeout(r, 20));
+    // Ship suggests the reply's first line as the notice shows it: "-5" stays negative.
+    assert.equal((await mgr.shipPreview(working.id)).suggestedMessage, "-5 degrees fixed");
 
     // Closed after its commits were force-pushed away on GitHub: Ship's old head is no backup, so nothing goes.
     const replaced = await mgr.createSession({ cwd: repo });

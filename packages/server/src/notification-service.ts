@@ -9,23 +9,34 @@ export interface ChangeStats {
   files: number;
   additions: number;
   deletions: number;
+  /** A text file was too big to count, or past the total budget: the line counts are short. */
+  partial?: boolean;
 }
 
 const ICON = { done: "✅", question: "❓", error: "⚠️" } as const;
 
 /** The first line of a reply that says something, outside code blocks and without Markdown markup. */
 export function headline(text: string | undefined): string | undefined {
-  let fenced = false;
+  let fence: string | undefined;
   for (const raw of text?.split("\n") ?? []) {
-    if (/^\s*(```|~~~)/.test(raw)) {
-      fenced = !fenced;
+    const marker = /^\s*(`{3,}|~{3,})/.exec(raw)?.[1];
+    if (fence) {
+      // Closed only by the same character, at least as many, alone on the line: ``` inside ```` is content.
+      if (marker && marker[0] === fence[0] && marker.length >= fence.length && raw.trim() === marker) fence = undefined;
       continue;
     }
-    if (fenced) continue;
+    if (marker) {
+      fence = marker;
+      continue;
+    }
+    if (/^\s*([-*_])(?:\s*\1){2,}\s*$/.test(raw)) continue; // a thematic break: ***, - - -
     const line = raw.trim()
       .replace(/^(?:#{1,6}\s+|>\s*|[-*+]\s+|\d+[.)]\s+)+/, "") // headings, quotes, list markers; not "-5"
       .replace(/\[([^\]]+)\]\([^)]*\)/g, "$1")
-      .replace(/\*\*|__|`/g, "")
+      // Emphasis goes, but not inside `code`: `__init__` is a name.
+      .split(/(`+[^`]*`+)/)
+      .map((part, i) => (i % 2 ? part.replace(/^`+|`+$/g, "") : part.replace(/\*\*|__/g, "")))
+      .join("")
       .trim();
     if (line) return line.slice(0, 200);
   }
@@ -34,7 +45,7 @@ export function headline(text: string | undefined): string | undefined {
 
 const STATS_TIMEOUT_MS = 5000;
 
-function noticeBody(notice: RunNotice, stats: ChangeStats | undefined): string {
+export function noticeBody(notice: RunNotice, stats: ChangeStats | undefined): string {
   if (notice.kind === "error") {
     return notice.cause === "no_model"
       ? "执行异常：未配置可用模型，运行无法继续。点此查看"
@@ -46,7 +57,10 @@ function noticeBody(notice: RunNotice, stats: ChangeStats | undefined): string {
     const choices = notice.question.choices?.join(" / ");
     return choices ? `${notice.question.text}\n${choices}` : notice.question.text;
   }
-  const changes = stats && stats.files > 0 ? `+${stats.additions} −${stats.deletions} · ${stats.files} 个文件` : undefined;
+  // Some files were too big to count: the file count is right, the line counts aren't.
+  const changes = !stats || stats.files === 0 ? undefined
+    : stats.partial ? `${stats.files} 个文件（有大文件，未统计行数）`
+      : `+${stats.additions} −${stats.deletions} · ${stats.files} 个文件`;
   return [headline(notice.summary), changes].filter(Boolean).join("\n") || "运行已结束，点此查看";
 }
 

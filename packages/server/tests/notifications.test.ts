@@ -5,7 +5,7 @@ import path from "node:path";
 import { it } from "node:test";
 import { setTimeout as sleep } from "node:timers/promises";
 import { MyPiClient, type NotificationFrame, type RawAgentEvent } from "@mypi/shared";
-import { headline, NotificationService } from "../src/notification-service.js";
+import { headline, NotificationService, noticeBody } from "../src/notification-service.js";
 import { startMyPiServer } from "../src/main.js";
 
 const start = (id: number): RawAgentEvent => ({ type: "run_start", inputs: [id] });
@@ -75,6 +75,18 @@ it("takes the headline from the first line of text, outside code, without Markdo
   assert.equal(headline("1. **Fixed** `config.ts`"), "Fixed config.ts");
   assert.equal(headline("> - [Fixed login](https://example.invalid)"), "Fixed login");
   assert.equal(headline("\n\n"), undefined);
+  // Code keeps its underscores; breaks and fences inside longer fences aren't headlines.
+  assert.equal(headline("Fixed `__init__` and `__exit__`."), "Fixed __init__ and __exit__.");
+  assert.equal(headline("***\nFixed login."), "Fixed login.");
+  assert.equal(headline("* * *\nFixed login."), "Fixed login.");
+  assert.equal(headline("````md\n```js\nnot a summary\n```\n````\nActual summary."), "Actual summary.");
+  assert.equal(headline("~~~\n```\n~~~\nAfter tildes."), "After tildes.");
+});
+
+it("leaves out line counts it couldn't take, rather than showing them as exact", () => {
+  const done = { id: "r1", kind: "ended" as const, summary: "Added data." };
+  assert.equal(noticeBody(done, { files: 2, additions: 5, deletions: 1 }), "Added data.\n+5 −1 · 2 个文件");
+  assert.equal(noticeBody(done, { files: 2, additions: 5, deletions: 1, partial: true }), "Added data.\n2 个文件（有大文件，未统计行数）");
 });
 
 it("drops a done notice whose run was superseded while its changes were being read", async () => {

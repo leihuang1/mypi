@@ -154,6 +154,67 @@ it("needs the user after a failure that leaves no reply, and when queued message
   }
 });
 
+it("takes its status from the runtime's records: not a retried old request, a withdrawn follow-up, or a lost save", async () => {
+  const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "mypi-input-")));
+  const { faux, modelsConfig } = testModels();
+  const dataDir = path.join(root, "data");
+  let manager = new HarnessManager({ dataDir, startDirs: [], modelsConfig });
+  const status = async (id: string) => (await manager.getSessionSummary(id)).status;
+  const settled = async (id: string) => faux.getPendingResponseCount() === 0 && !(await manager.getSessionSummary(id)).busy;
+  try {
+    const session = await manager.createSession({ cwd: root, name: "retries" });
+    await manager.updateSession(session.id, { model: { provider: "missing", modelId: "missing" } });
+    await manager.sendMessage(session.id, { requestId: "old", content: "go" });
+    await waitFor(async () => (await status(session.id)) === "needs_you", "the missing model");
+    await manager.updateSession(session.id, { model: { provider: "faux", modelId: "faux-1" } });
+    faux.setResponses([fauxAssistantMessage("Did it.")]);
+    await manager.sendMessage(session.id, { requestId: "new", content: "again" });
+    await waitFor(async () => (await status(session.id)) === "done", "the newer run");
+
+    // A client retrying the old request (its response was lost) gets the old submission back; the status stays.
+    const calls = faux.state.callCount;
+    await manager.sendMessage(session.id, { requestId: "old", content: "go" });
+    assert.deepEqual([await status(session.id), faux.state.callCount], ["done", calls]);
+
+    // A follow-up withdrawn before it ran isn't what the session is about.
+    let entered!: () => void;
+    let release!: () => void;
+    const started = new Promise<void>((resolve) => { entered = resolve; });
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    faux.setResponses([async () => {
+      entered();
+      await gate;
+      return fauxAssistantMessage("Did the third.");
+    }]);
+    await manager.sendMessage(session.id, { requestId: "third", content: "third" });
+    await started;
+    const queued = await manager.sendMessage(session.id, { requestId: "fourth", content: "fourth", whenBusy: "followUp" });
+    assert.equal((await manager.abortSubmission(session.id, queued.submissionId)).status, "aborted");
+    release();
+    await waitFor(() => settled(session.id), "the third run");
+    assert.equal(await status(session.id), "done");
+
+    // A restart reads the same records, and so does a catalog that never had a pointer.
+    await manager.close();
+    manager = new HarnessManager({ dataDir, startDirs: [], modelsConfig });
+    assert.equal(await status(session.id), "done");
+
+    // After a reset, the old requests are history, retried or not.
+    await manager.resetSession(session.id);
+    await manager.sendMessage(session.id, { requestId: "new", content: "again" });
+    assert.equal(await status(session.id), "idle");
+
+    // A question isn't compacted away: its ask is the only record of it.
+    faux.setResponses([fauxAssistantMessage([fauxToolCall("ask_user", { question: "Old or new API?" })], { stopReason: "toolUse" })]);
+    await manager.sendMessage(session.id, { requestId: "ask", content: "which?" });
+    await waitFor(async () => (await status(session.id)) === "needs_you", "the question");
+    await assert.rejects(manager.compactSession(session.id), /回答后再压缩/);
+  } finally {
+    await manager.close();
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
 it("reads the conversation's state from its last model messages", () => {
   const entry = (...model: Record<string, unknown>[]): RawEntryRecord => ({ id: 1, conversationId: 0, kind: "x", model });
   const user = { role: "user", content: "go" };

@@ -54,7 +54,11 @@ async function readJsonBody<T>(req: IncomingMessage): Promise<T> {
   }
   const raw = Buffer.concat(chunks).toString("utf8").trim();
   if (!raw) return {} as T;
-  return JSON.parse(raw) as T;
+  try {
+    return JSON.parse(raw) as T;
+  } catch {
+    throw new BadRequestError("The request body isn't valid JSON");
+  }
 }
 
 function checkBearerAuth(
@@ -308,7 +312,7 @@ export function createRequestHandler(options: {
           let body: ShipRequest | undefined;
           if (req.method === "POST") {
             body = await readJsonBody<ShipRequest>(req);
-            if (!body || typeof body !== "object" || (body.message !== undefined && (typeof body.message !== "string" || body.message.includes("\0")))) {
+            if (!body || typeof body !== "object" || Array.isArray(body) || (body.message !== undefined && (typeof body.message !== "string" || body.message.includes("\0")))) {
               throw new BadRequestError("Ship takes { message?: string }");
             }
           }
@@ -320,7 +324,7 @@ export function createRequestHandler(options: {
         // POST /v1/sessions/:id/archive
         if (req.method === "POST" && subRoute === "archive") {
           const body = await readJsonBody<ArchiveRequest>(req);
-          if (!body || typeof body !== "object" || (body.force !== undefined && typeof body.force !== "boolean")) {
+          if (!body || typeof body !== "object" || Array.isArray(body) || (body.force !== undefined && typeof body.force !== "boolean")) {
             throw new BadRequestError("Archive takes { force?: boolean }");
           }
           const result = await manager.archiveSession(sessionId, body);
