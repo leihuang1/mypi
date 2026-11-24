@@ -290,3 +290,35 @@ it("lets git check once more before removing: a file written after the count sta
   git(wt.path, "commit", "-qm", "late");
   assert.equal((await worktreeWork({ ...wt, gitDir: undefined, baseCommit: undefined })).unpushed, 1);
 });
+
+it("keeps ignored files in build folders, finds a removed worktree under another spelling, and owns only its own rollback", async () => {
+  const { dir, repo, upstream } = fixture("second");
+  upstream(".gitignore", "build/\n*.log\nnode_modules/\n");
+  const wtRoot = path.join(dir, "worktrees");
+  const a = (await createSessionWorktree(repo, wtRoot, "a1"))!;
+  write(path.join(a.path, "build/.env"), "ONLY=here\n");
+  write(path.join(a.path, "experiments/training.log"), "results\n");
+  write(path.join(a.path, "node_modules/x/index.js"), "x\n");
+  assert.equal((await worktreeWork(a)).ignored, 2, "build/ and the log are work; node_modules isn't");
+
+  // The catalog has a spelling git doesn't (a symlinked data folder; on macOS /var is /private/var).
+  const alias = path.join(dir, "alias");
+  fs.symlinkSync(wtRoot, alias);
+  const b = (await createSessionWorktree(repo, wtRoot, "b2"))!;
+  const aliased = { ...b, path: path.join(alias, path.basename(b.path)) };
+  git(b.path, "checkout", "-q", "--detach");
+  write(path.join(b.path, "d.md"), "d\n");
+  git(b.path, "add", "-A");
+  git(b.path, "commit", "-qm", "detached");
+  fs.rmSync(b.path, { recursive: true, force: true });
+  assert.equal((await worktreeWork(aliased)).unpushed, 1, "its HEAD is still found");
+  assert.equal((await removeSessionWorktree(aliased, { force: true })).removed, true);
+  assert.equal(git(repo, "log", "-1", "--format=%s", `${b.branch}-detached`), "detached");
+
+  // A second create with the same id fails, and leaves the first one's branch and folder alone.
+  const first = (await createSessionWorktree(repo, wtRoot, "c3"))!;
+  fs.writeFileSync(path.join(first.path, "keep.txt"), "k\n");
+  git(repo, "update-ref", "-d", "refs/heads/mypi/c3"); // the precheck passes, as in a race; worktree add then fails
+  await assert.rejects(createSessionWorktree(repo, wtRoot, "c3"), /already exists/);
+  assert.ok(fs.existsSync(path.join(first.path, "keep.txt")));
+});

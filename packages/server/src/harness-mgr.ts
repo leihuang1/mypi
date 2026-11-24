@@ -64,7 +64,7 @@ import { createPiCompatExtension } from "./extensions/pi-compat.js";
 import { changeStats, inspectGitDirectory, noGitStatus } from "./git-service.js";
 import { BadRequestError, ConflictError } from "./errors.js";
 import { pullRequestState, shipState, shipWorktree } from "./ship.js";
-import { createSessionWorktree, removeSessionWorktree, type SessionWorktree, worktreeCwd } from "./worktree-service.js";
+import { createSessionWorktree, gitEnv, networkEnv, removeSessionWorktree, type SessionWorktree, worktreeCwd } from "./worktree-service.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -534,7 +534,7 @@ export class HarnessManager {
 
     let isGitRepo = fs.existsSync(path.join(targetPath, ".git"));
     if (req.gitInit && !isGitRepo) {
-      await execFileAsync("git", ["init"], { cwd: targetPath });
+      await execFileAsync("git", ["init"], { cwd: targetPath, env: gitEnv() });
       isGitRepo = true;
     }
 
@@ -568,6 +568,7 @@ export class HarnessManager {
     await execFileAsync("git", ["clone", repoUrl, targetPath], {
       cwd: parentDir,
       timeout: 120_000,
+      env: networkEnv(),
     });
 
     return {

@@ -117,7 +117,10 @@ const COUNT_TOTAL_BYTES = 32 * 1024 * 1024;
 export async function changeStats(cwd: string, baseRef?: string, baseCommit?: string): Promise<{ files: number; additions: number; deletions: number }> {
   const repoRoot = (await runGit(cwd, ["rev-parse", "--show-toplevel"])).replace(/\n$/, "");
   const head = (await runGit(repoRoot, ["rev-parse", "--verify", "--quiet", "HEAD"])).trim();
-  const base = (await mergeBase(repoRoot, head, baseRef, baseCommit)) ?? head;
+  const merged = await mergeBase(repoRoot, head, baseRef, baseCommit);
+  // The branch shares no history with its base (an orphan branch): no honest count, rather than "no changes".
+  if (!merged && (baseRef || baseCommit)) throw new Error("The session's changes can't be measured against its base");
+  const base = merged ?? head;
   const [numstat, untracked] = await Promise.all([
     runGit(repoRoot, ["diff", "--numstat", "-z", "--no-renames", "--no-ext-diff", "--no-textconv", "--ignore-submodules=all", base, "--"]),
     runGit(repoRoot, ["ls-files", "--others", "--exclude-standard", "-z"]),

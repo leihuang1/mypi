@@ -48,10 +48,10 @@ export function gitEnv(extra: Record<string, string> = {}): NodeJS.ProcessEnv {
 export const networkEnv = () => gitEnv({ GIT_TERMINAL_PROMPT: "0", GCM_INTERACTIVE: "never" });
 
 // Regenerable output that cleanup may delete with a worktree. Any other ignored file counts as work.
-// Dependencies, build output and tool caches only; an ignored log or data file may be the only record of something.
+// Installed dependencies and tool caches only. Build folders (build/, dist/, target/) can hold a local .env or results,
+// and an ignored log may be the only record of a run, so they count as work.
 const DISPOSABLE = new Set(["node_modules", ".venv", "venv", "__pycache__", ".pytest_cache", ".mypy_cache", ".ruff_cache",
-  "dist", "build", "target", ".next", ".nuxt", ".turbo", ".cache", ".parcel-cache", "coverage", ".gradle",
-  ".DS_Store"]);
+  ".next", ".nuxt", ".turbo", ".parcel-cache", ".gradle", ".DS_Store"]);
 const DISPOSABLE_FILE = /\.(pyc|tsbuildinfo)$/;
 
 function disposable(ignoredPath: string): boolean {
@@ -136,9 +136,12 @@ export async function createSessionWorktree(cwd: string, root: string, id: strin
     await git(gitDir, ["-c", "core.hooksPath=/dev/null", "worktree", "add", "--quiet", "--no-track", "-b", branch, worktreePath, baseCommit],
       { timeout: 120_000 });
   } catch (err) {
-    // A checkout can fail halfway (a filter), leaving the new branch or worktree: both hold only the base, so drop them.
-    await git(gitDir, ["worktree", "remove", "--force", worktreePath]).catch(() => "");
-    await git(gitDir, ["branch", "-D", branch]).catch(() => "");
+    // A checkout can fail halfway (a filter), leaving the new branch or worktree: both hold only the base, so drop
+    // them. Not when the branch or folder already existed: another attempt made those.
+    if (!/already exists/.test(String((err as { stderr?: string }).stderr))) {
+      await git(gitDir, ["worktree", "remove", "--force", worktreePath]).catch(() => "");
+      await git(gitDir, ["branch", "-D", branch]).catch(() => "");
+    }
     throw err;
   }
   return { sourceCwd: cwd, repoPath, gitDir, path: worktreePath, branch, baseRef, baseCommit };
@@ -156,14 +159,18 @@ const gitDirOf = (worktree: SessionWorktree) => worktree.gitDir ?? worktree.repo
 
 /** The worktree's registration and its HEAD, which git keeps even when the folder was deleted by hand. */
 async function registration(worktree: SessionWorktree): Promise<{ head?: string } | undefined> {
-  const list = await git(gitDirOf(worktree), ["worktree", "list", "--porcelain"]);
+  // -z: a path may contain a newline.
+  const list = await git(gitDirOf(worktree), ["worktree", "list", "--porcelain", "-z"]);
   const target = path.resolve(worktree.path);
-  const real = fs.existsSync(target) ? fs.realpathSync(target) : target;
-  for (const entry of list.split("\n\n")) {
-    const lines = entry.split("\n");
-    const dir = lines.find((l) => l.startsWith("worktree "))?.slice("worktree ".length);
+  // Git records the real path; once the folder is gone, resolve its parent instead (/var is /private/var).
+  const parent = path.dirname(target);
+  const real = fs.existsSync(target) ? fs.realpathSync(target)
+    : fs.existsSync(parent) ? path.join(fs.realpathSync(parent), path.basename(target)) : target;
+  for (const entry of list.split("\0\0")) {
+    const fields = entry.split("\0");
+    const dir = fields.find((f) => f.startsWith("worktree "))?.slice("worktree ".length);
     if (dir && (path.resolve(dir) === target || path.resolve(dir) === real)) {
-      return { head: lines.find((l) => l.startsWith("HEAD "))?.slice("HEAD ".length) };
+      return { head: fields.find((f) => f.startsWith("HEAD "))?.slice("HEAD ".length) };
     }
   }
   return undefined;
