@@ -6,6 +6,7 @@ import { it } from "node:test";
 import { setTimeout as sleep } from "node:timers/promises";
 import { MyPiClient, type NotificationFrame, type RawAgentEvent } from "@mypi/shared";
 import { headline, NotificationService, noticeBody } from "../src/notification-service.js";
+import { reduceRunNotice, type RunNoticeState } from "../src/notification-state.js";
 import { startMyPiServer } from "../src/main.js";
 
 const start = (id: number): RawAgentEvent => ({ type: "run_start", inputs: [id] });
@@ -81,6 +82,22 @@ it("takes the headline from the first line of text, outside code, without Markdo
   assert.equal(headline("* * *\nFixed login."), "Fixed login.");
   assert.equal(headline("````md\n```js\nnot a summary\n```\n````\nActual summary."), "Actual summary.");
   assert.equal(headline("~~~\n```\n~~~\nAfter tildes."), "After tildes.");
+});
+
+it("keeps a waiting question through a compaction, whose summary reads as a user message but answers nothing", () => {
+  const entry = (id: number, kind: string, ...model: Record<string, unknown>[]) => ({ id, conversationId: 0, kind, model });
+  const ask = { role: "assistant", stopReason: "toolUse", content: [{ type: "toolCall", name: "ask_user", arguments: { question: "Keep it?" } }] };
+  const events = [
+    { type: "run_start", inputs: [1] },
+    { type: "message_end", entry: entry(10, "pi.assistant", ask) },
+    { type: "message_end", entry: entry(11, "pi.compaction", { role: "user", content: "Summary of earlier work." }) },
+    { type: "message_end", entry: entry(12, "pi.assistant", { role: "assistant", stopReason: "stop", content: [{ type: "text", text: "Waiting." }] }) },
+  ] as unknown as RawAgentEvent[];
+  const state = events.reduce<RunNoticeState>(reduceRunNotice, {});
+  assert.equal(state.question?.text, "Keep it?");
+  // A real answer still clears it.
+  const answered = reduceRunNotice(state, { type: "message_end", entry: entry(13, "pi.user", { role: "user", content: "yes" }) } as unknown as RawAgentEvent);
+  assert.equal(answered.question, undefined);
 });
 
 it("leaves out line counts it couldn't take, rather than showing them as exact", () => {

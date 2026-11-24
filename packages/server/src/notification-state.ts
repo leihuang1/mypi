@@ -25,9 +25,15 @@ export interface RunNoticeState {
   pending?: RunNotice;
 }
 
+/** Whether the entry is the user speaking: a message, a steer, a reset's handoff. A compaction's summary is phrased as
+ * a user message, but it answers nothing. */
+export function userSpoke(entry: RawEntryRecord): boolean {
+  return entry.kind !== "pi.compaction" && Boolean(entry.model?.some((msg) => msg.role === "user"));
+}
+
 function withEntry(state: RunNoticeState, entry?: RawEntryRecord): RunNoticeState {
   // A steer answers an earlier question.
-  const next = entry?.model?.some((msg) => msg.role === "user") ? { ...state, question: undefined } : state;
+  const next = entry && userSpoke(entry) ? { ...state, question: undefined } : state;
   const message = entry?.model?.find((msg) => msg.role === "assistant");
   if (!message) return next;
   if (message.stopReason === "error") return { ...next, error: "model" };
@@ -42,7 +48,7 @@ function recovered(state: RunNoticeState, entries: readonly RawEntryRecord[]): R
   let summary: string | undefined;
   for (let i = entries.length - 1; i >= 0; i--) {
     const messages = entries[i].model ?? [];
-    if (messages.some((msg) => msg.role === "user")) break;
+    if (userSpoke(entries[i])) break;
     const message = messages.find((msg) => msg.role === "assistant");
     if (!message || message.stopReason === "error") continue;
     const turn = assistantTurn(message);

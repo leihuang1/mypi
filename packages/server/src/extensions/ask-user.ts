@@ -104,7 +104,7 @@ export function conversationState(entries: readonly RawEntryRecord[]): { questio
     const messages = (entries[e].model ?? []) as Record<string, unknown>[];
     for (let i = messages.length - 1; i >= 0; i--) {
       const message = messages[i];
-      if (message.role === "user") break scan;
+      if (message.role === "user" && entries[e].kind !== "pi.compaction") break scan; // a compaction's summary answers nothing
       if (message.role !== "assistant") continue; // tool results and system sections
       latest ??= message;
       const question = asked ? undefined : assistantTurn(message).question;
