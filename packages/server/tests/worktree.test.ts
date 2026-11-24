@@ -46,20 +46,20 @@ const write = (file: string, content: string) => {
 };
 
 /** A bare `origin`, a clone of it, and an upstream commit the clone hasn't fetched yet. */
-function fixture(name: string) {
+function fixture(name: string, format: string[] = []) {
   const dir = path.join(root, name);
   const remote = path.join(dir, "remote.git");
   const seed = path.join(dir, "seed");
   const repo = path.join(dir, "repo");
   fs.mkdirSync(dir);
-  git(dir, "init", "-q", "--bare", "-b", "main", remote);
+  git(dir, "init", "-q", "--bare", "-b", "main", ...format, remote);
   git(dir, "clone", "-q", remote, seed);
   write(path.join(seed, "README.md"), "hello\n");
   write(path.join(seed, "packages/app/index.js"), "export const a = 1;\n");
   git(seed, "add", "-A");
   git(seed, "commit", "-qm", "init");
   git(seed, "push", "-q", "origin", "main");
-  git(dir, "clone", "-q", remote, repo);
+  git(dir, "clone", "-q", ...format.filter((f) => f.startsWith("--ref-format")), remote, repo);
   const upstream = (file: string, content: string) => {
     write(path.join(seed, file), content);
     git(seed, "add", "-A");
@@ -403,6 +403,36 @@ it("loses nothing written after the count: late files go to trash, a late commit
   git(wt4.path, "add", "-A");
   git(wt4.path, "commit", "-qm", "x");
   assert.equal((await worktreeWork({ ...wt4, gitDir: undefined, baseCommit: undefined })).unpushed, 1);
+});
+
+it("keeps a detached commit and a moved branch in SHA-256 and reftable repositories too", async () => {
+  for (const format of [["--object-format=sha256"], ["--ref-format=reftable"]]) {
+    const { dir, repo } = fixture(`format-${format[0].slice(2, 5)}`, format);
+    const root = path.join(dir, "worktrees");
+    const wt = (await createSessionWorktree(repo, root, "f1"))!;
+    git(wt.path, "checkout", "-q", "--detach");
+    write(path.join(wt.path, "d.txt"), "d\n");
+    git(wt.path, "add", "-A");
+    git(wt.path, "commit", "-qm", "detached");
+    const detached = git(wt.path, "rev-parse", "HEAD");
+    assert.equal((await removeSessionWorktree(wt, { force: true })).removed, true, format[0]);
+    assert.equal(git(repo, "rev-parse", `${wt.branch}-detached`), detached, format[0]);
+
+    // The branch moves just before it's deleted: what git deleted is put back, whatever the id's length.
+    const wt2 = (await createSessionWorktree(repo, root, "f2"))!;
+    const bin = path.join(dir, "bin");
+    const ref = `refs/heads/${wt2.branch}`;
+    write(path.join(bin, "git"), `#!/bin/sh\ncase "$*" in *"branch -D"*) cd "${repo}" && n=$(/usr/bin/git commit-tree -p ${ref} -m later "${ref}^{tree}") && /usr/bin/git update-ref ${ref} $n;; esac\nexec /usr/bin/git "$@"\n`);
+    fs.chmodSync(path.join(bin, "git"), 0o755);
+    const savedPath = process.env.PATH;
+    process.env.PATH = `${bin}:${savedPath}`;
+    try {
+      assert.equal((await removeSessionWorktree(wt2)).branchDeleted, false, format[0]);
+    } finally {
+      process.env.PATH = savedPath;
+    }
+    assert.equal(git(repo, "log", "-1", "--format=%s", wt2.branch), "later", format[0]);
+  }
 });
 
 it("keeps ignored files in build folders, finds a removed worktree under another spelling, and owns only its own rollback", async () => {

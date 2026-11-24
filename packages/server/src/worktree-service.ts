@@ -304,8 +304,15 @@ export async function removeSessionWorktree(
     fs.renameSync(meta, retired);
   }
   try {
-    const head = retired ? fs.readFileSync(path.join(retired, "HEAD"), "utf8").trim() : "";
-    if (/^[0-9a-f]{40}$/.test(head) && !(await backedUp(gitDir, head, safe)) &&
+    // HEAD as git resolves it from the moved metadata: any object format, any ref storage (reftable's HEAD file
+    // isn't the commit). Not resolving is fine only for a branch with no commits yet.
+    const head = retired
+      ? await git(gitDir, ["--git-dir", retired, "rev-parse", "--verify", "--quiet", "HEAD^{commit}"]).catch(() => "")
+      : "";
+    if (retired && !head && !(await git(gitDir, ["--git-dir", retired, "symbolic-ref", "-q", "HEAD"]).then(() => true, () => false))) {
+      throw new Error(`Can't read the HEAD of the worktree at ${checkout}`);
+    }
+    if (head && !(await backedUp(gitDir, head, safe)) &&
       !(await git(gitDir, ["branch", "--contains", head, "--format=%(refname)"]))) {
       const taken = await hasRef(gitDir, `refs/heads/${worktree.branch}-detached`);
       await git(gitDir, ["branch", `${worktree.branch}-detached${taken ? `-${head.slice(0, 8)}` : ""}`, head]);
@@ -334,7 +341,7 @@ export async function removeSessionWorktree(
   const tip = await git(gitDir, ["rev-parse", "--verify", "--quiet", `refs/heads/${worktree.branch}^{commit}`]).catch(() => "");
   if (!tip || !(await backedUp(gitDir, tip, safe))) return { removed: true, branchDeleted: false, work };
   const out = await git(gitDir, ["-c", "core.abbrev=no", "branch", "-D", worktree.branch]).catch(() => "");
-  const was = /\(was ([0-9a-f]{40})\)/.exec(out)?.[1];
+  const was = /\(was ([0-9a-f]+)\)/.exec(out)?.[1];
   if (was && was !== tip) {
     // It moved between the check and the delete: put it back, under another name if that's been taken since.
     await git(gitDir, ["branch", worktree.branch, was])
