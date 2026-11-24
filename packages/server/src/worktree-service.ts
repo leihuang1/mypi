@@ -451,7 +451,9 @@ export async function removeSessionWorktree(
     (await git(gitDir, ["worktree", "list", "--porcelain", "-z"]).catch(() => `branch ${ref}`)).split("\0").includes(`branch ${ref}`);
   if (await checkedOut()) return { removed: true, branchDeleted: false, work };
   // Only if it still points at the tip checked: a commit made meanwhile keeps it.
-  const deleted = await git(gitDir, ["update-ref", "--no-deref", "-d", ref, tip]).then(() => true, () => false);
+  // Refused only if git said so (it exited): one stopped by a signal or the timeout may have deleted it.
+  const deleted = await git(gitDir, ["update-ref", "--no-deref", "-d", ref, tip])
+    .then(() => true, (err: { code?: unknown }) => typeof err.code !== "number");
   const now = await git(gitDir, ["rev-parse", "--verify", "--quiet", `${ref}^{commit}`]).catch(() => "");
   if (now) {
     // Moved, so kept. Or deleted and then made again, by a commit in a checkout of it that was still under way: that

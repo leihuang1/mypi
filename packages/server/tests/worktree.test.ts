@@ -612,6 +612,23 @@ it("says how to put back a commit made on the branch while it was being deleted,
   }
   assert.equal(git(repo, "log", "-1", "--format=%s", wt3.branch), "amended");
   assert.deepEqual(warned.filter((w) => w.includes("made again")), []);
+
+  // Deleted, made again without history, and git stopped (by the timeout, say) before it said so: told all the same.
+  const wt4 = (await createSessionWorktree(repo, path.join(dir, "worktrees"), "c4"))!;
+  const tip4 = git(repo, "rev-parse", wt4.branch);
+  write(path.join(bin, "git"), `#!/bin/sh\n/usr/bin/git "$@"\nrc=$?\ncase "$*" in *"--no-deref -d"*) cd "${repo}" && ` +
+    `n=$(/usr/bin/git commit-tree -m late "${tip4}^{tree}") && /usr/bin/git update-ref refs/heads/${wt4.branch} $n && kill -KILL $$;; esac\nexit $rc\n`);
+  warned.length = 0;
+  process.env.PATH = `${bin}:${savedPath}`;
+  console.warn = (...args: unknown[]) => { warned.push(args.map(String).join(" ")); };
+  try {
+    assert.equal((await removeSessionWorktree(wt4)).branchDeleted, false);
+  } finally {
+    process.env.PATH = savedPath;
+    console.warn = warn;
+  }
+  assert.equal(git(repo, "log", "-1", "--format=%s", wt4.branch), "late");
+  assert.equal(warned.filter((w) => w.includes("made again")).length, 1, warned.join("\n"));
 });
 
 it("keeps an old detached commit even if git's prune and gc run just as the metadata is renamed", async () => {
