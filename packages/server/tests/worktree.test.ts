@@ -381,6 +381,15 @@ it("loses nothing written after the count: late files go to trash, a late commit
   });
   assert.equal(staged, "staged\n");
 
+  // A conflict staged just after the count: the index can't be kept as a tree, so an unconfirmed removal stops
+  // before the move, and the worktree is as it was.
+  const wt17 = (await createSessionWorktree(repo, root, "l17"))!;
+  late("status --porcelain", `cd "${wt17.path}" && b=$(echo x | /usr/bin/git hash-object -w --stdin) && ` +
+    `printf "100644 $b 1\\tc.txt\\n100644 $b 2\\tc.txt\\n" | /usr/bin/git update-index --index-info`);
+  await assert.rejects(withShim(() => removeSessionWorktree(wt17)), /unmerged|write-tree/);
+  assert.match(git(wt17.path, "ls-files", "--stage"), /\t?c\.txt/);
+  assert.ok(git(repo, "worktree", "list", "--porcelain").includes(wt17.path));
+
   // The catalog's path is now a symlink to where the checkout was moved: the checkout itself goes to trash.
   const wt10 = (await createSessionWorktree(repo, root, "l10"))!;
   const movedTo = path.join(dir, "moved-l10");
@@ -456,6 +465,26 @@ it("loses nothing written after the count: late files go to trash, a late commit
   git(wt4.path, "add", "-A");
   git(wt4.path, "commit", "-qm", "x");
   assert.equal((await worktreeWork({ ...wt4, gitDir: undefined, baseCommit: undefined })).unpushed, 1);
+});
+
+it("puts git's metadata back after a failure before the move, even if git's gc removed the folder it was in", async () => {
+  const { dir, repo } = fixture("restore");
+  const root = path.join(dir, "worktrees");
+  const wt = (await createSessionWorktree(repo, root, "r1"))!;
+  fs.writeFileSync(path.join(root, ".mypi-trash"), ""); // a file: the trash folder can't be made
+  const rename = fs.renameSync;
+  fs.renameSync = ((from: fs.PathLike, to: fs.PathLike) => {
+    rename(from, to);
+    // What `git gc` does to the worktrees/ folder this left empty.
+    if (String(to).includes("mypi-retired")) fs.rmdirSync(path.dirname(String(from)));
+  }) as typeof fs.renameSync;
+  try {
+    await assert.rejects(removeSessionWorktree(wt), /EEXIST|ENOTDIR/);
+  } finally {
+    fs.renameSync = rename;
+  }
+  assert.equal(git(wt.path, "rev-parse", "--abbrev-ref", "HEAD"), wt.branch, "the checkout works as before");
+  assert.ok(git(repo, "worktree", "list", "--porcelain").includes(wt.path));
 });
 
 it("keeps a detached commit and a moved branch in SHA-256 and reftable repositories too", async () => {

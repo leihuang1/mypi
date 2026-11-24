@@ -278,6 +278,12 @@ function metadataDir(commonDir: string, checkout: string): string | undefined {
   return undefined;
 }
 
+/** Git's metadata for a worktree, back where it was: `git gc` may have removed the `worktrees/` folder it left empty. */
+function restore(retired: string, meta: string): void {
+  fs.mkdirSync(path.dirname(meta), { recursive: true });
+  fs.renameSync(retired, meta);
+}
+
 /** Why the worktree with this metadata mustn't be removed, confirmed or not. */
 function refusal(meta: string): string | undefined {
   if (fs.existsSync(path.join(meta, "locked"))) return "git 不让移除这个工作区（它被 git worktree lock 锁住了），先在电脑上解锁";
@@ -329,16 +335,30 @@ export async function removeSessionWorktree(
     // Checked again where nothing can change it any more: a submodule added or a lock taken just before the move.
     const late = refusal(retired);
     if (late) {
-      fs.renameSync(retired, meta);
+      restore(retired, meta);
       return kept(late);
     }
   }
   try {
+    // What's staged and not committed: the moved index lists it, but only a ref keeps it from git's garbage
+    // collection, so this comes first. A commit on refs/mypi-retired/<name>, on top of HEAD, expired with the
+    // metadata. Without it (a conflicted index) only a confirmed removal goes on.
+    const staged = retired
+      ? await git(gitDir, ["--git-dir", retired, "write-tree"]).catch((err) => {
+        if (options.force) return "";
+        throw err;
+      })
+      : "";
     // HEAD as git resolves it from the moved metadata: any object format, any ref storage (reftable's HEAD file
     // isn't the commit). Not resolving is fine only for a branch with no commits yet.
     const head = retired
       ? await git(gitDir, ["--git-dir", retired, "rev-parse", "--verify", "--quiet", "HEAD^{commit}"]).catch(() => "")
       : "";
+    if (staged && staged !== (head && (await git(gitDir, ["rev-parse", `${head}^{tree}`])))) {
+      const commit = await git(gitDir, ["-c", "user.name=mypi", "-c", "user.email=mypi@localhost", "commit-tree", staged,
+        ...(head ? ["-p", head] : []), "-m", `mypi: staged in the worktree of ${worktree.branch} when it was removed`]);
+      await git(gitDir, ["update-ref", `refs/mypi-retired/${path.basename(retired!).replace(/[^\w.-]/g, "_")}`, commit]);
+    }
     if (retired && !head && !(await git(gitDir, ["--git-dir", retired, "symbolic-ref", "-q", "HEAD"]).then(() => true, () => false))) {
       throw new Error(`Can't read the HEAD of the worktree at ${checkout}`);
     }
@@ -346,20 +366,6 @@ export async function removeSessionWorktree(
       !(await git(gitDir, ["branch", "--contains", head, "--format=%(refname)"]))) {
       const taken = await hasRef(gitDir, `refs/heads/${worktree.branch}-detached`);
       await git(gitDir, ["branch", `${worktree.branch}-detached${taken ? `-${head.slice(0, 8)}` : ""}`, head]);
-    }
-    // What's staged and not committed: the moved index lists it, but only a ref keeps it from git's garbage
-    // collection. A commit on refs/mypi-retired/<name>, on top of HEAD, expired with the metadata. Without it (a
-    // conflicted index) only a confirmed removal goes on.
-    if (retired) {
-      const staged = await git(gitDir, ["--git-dir", retired, "write-tree"]).catch((err) => {
-        if (options.force) return "";
-        throw err;
-      });
-      if (staged && staged !== (head && (await git(gitDir, ["rev-parse", `${head}^{tree}`])))) {
-        const commit = await git(gitDir, ["-c", "user.name=mypi", "-c", "user.email=mypi@localhost", "commit-tree", staged,
-          ...(head ? ["-p", head] : []), "-m", `mypi: staged in the worktree of ${worktree.branch} when it was removed`]);
-        await git(gitDir, ["update-ref", `refs/mypi-retired/${path.basename(retired).replace(/[^\w.-]/g, "_")}`, commit]);
-      }
     }
     if (fs.existsSync(checkout) && options.force) {
       fs.rmSync(checkout, { recursive: true, force: true });
@@ -370,7 +376,13 @@ export async function removeSessionWorktree(
     }
   } catch (err) {
     // Not moved (or a forced delete stopped partway): the checkout is still there, so its metadata goes back.
-    if (retired && meta) fs.renameSync(retired, meta);
+    if (retired && meta) {
+      try {
+        restore(retired, meta);
+      } catch (again) {
+        throw new Error(`${firstLine(err)}; and git's metadata for ${checkout} couldn't be put back from ${retired}: ${firstLine(again)}`);
+      }
+    }
     throw err;
   }
   // From here the checkout is in trash whatever happens: housekeeping can fail, but doesn't undo that.
@@ -398,5 +410,7 @@ export async function removeSessionWorktree(
       .catch((err) => console.warn(`[mypi-server] ${worktree.branch} was checked out while being deleted, and couldn't be put back at ${tip}: ${firstLine(err)}`));
     return { removed: true, branchDeleted: false, work };
   }
+  // Said, with its commit: a checkout of it still under way (no check can see one) is left on a deleted branch.
+  console.log(`[mypi-server] Deleted ${worktree.branch} at ${tip}: everything on it is in its base or its merged PR`);
   return { removed: true, branchDeleted: true, work };
 }
