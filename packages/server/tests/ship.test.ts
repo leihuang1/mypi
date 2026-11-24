@@ -257,6 +257,11 @@ it("archives a session once its PR is merged, even after GitHub deleted its bran
     commit(busy.worktreePath!, "h.txt", "h\n");
     await mgr.shipSession(busy.id, { message: "h" });
     fs.writeFileSync(path.join(busy.worktreePath!, "h.txt"), "more\n");
+    // One whose worktree can't be read for now: cleanup fails every round.
+    const unreadable = await mgr.createSession({ cwd: repo });
+    commit(unreadable.worktreePath!, "u.txt", "u\n");
+    await mgr.shipSession(unreadable.id, { message: "u" });
+    fs.chmodSync(unreadable.worktreePath!, 0o000);
 
     // Squash-merged on GitHub, which then deleted the branch; a later fetch pruned it here.
     git(remote, "update-ref", "-d", `refs/heads/${merged.branch}`);
@@ -264,10 +269,21 @@ it("archives a session once its PR is merged, even after GitHub deleted its bran
     assert.equal(exists(repo, `refs/remotes/origin/${merged.branch}`), false);
     fs.writeFileSync(path.join(root, "pr-state"), "MERGED");
     // Without the head GitHub merged, Ship's old head proves nothing: kept, and asked again.
-    await mgr.checkPullRequests();
-    assert.deepEqual([(await mgr.getSessionSummary(merged.id)).status, fs.existsSync(merged.worktreePath!)], ["done", true]);
-    fs.writeFileSync(path.join(root, "pr-head"), mergedHead);
-    await mgr.checkPullRequests();
+    const warned: string[] = [];
+    const warn = console.warn;
+    console.warn = (...args: unknown[]) => { warned.push(args.map(String).join(" ")); };
+    try {
+      await mgr.checkPullRequests();
+      assert.deepEqual([(await mgr.getSessionSummary(merged.id)).status, fs.existsSync(merged.worktreePath!)], ["done", true]);
+      fs.writeFileSync(path.join(root, "pr-head"), mergedHead);
+      await mgr.checkPullRequests();
+    } finally {
+      console.warn = warn;
+      fs.chmodSync(unreadable.worktreePath!, 0o755);
+    }
+    // Kept for the same reason on both rounds, whether it's work or an error: said once each.
+    assert.equal(warned.filter((w) => w.includes(`Kept the worktree of ${busy.id}`)).length, 1);
+    assert.equal(warned.filter((w) => w.includes(`Kept the worktree of ${unreadable.id}`)).length, 1);
 
     const after = await mgr.getSessionSummary(merged.id);
     assert.deepEqual([after.status, after.prState], ["archived", "merged"]);
@@ -281,6 +297,7 @@ it("archives a session once its PR is merged, even after GitHub deleted its bran
     git(busy.worktreePath!, "checkout", "--", "h.txt");
     await mgr.checkPullRequests();
     assert.equal((await mgr.getSessionSummary(busy.id)).status, "archived");
+    assert.equal((await mgr.getSessionSummary(unreadable.id)).status, "archived", "readable again: cleaned up");
     assert.equal(fs.existsSync(busy.worktreePath!), false);
   } finally {
     fs.rmSync(path.join(root, "pr-state"));

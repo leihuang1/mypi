@@ -1233,10 +1233,17 @@ export class HarnessManager {
    */
   private async cleanUp(meta: CatalogEntry): Promise<void> {
     if (await this.isRunning(meta)) return;
-    const result = meta.worktree ? await removeSessionWorktree(meta.worktree, { pushed: shippedHead(meta) }) : undefined;
-    if (result && !result.removed && !result.unregistered) {
+    let why: string | undefined;
+    if (meta.worktree) {
+      try {
+        const result = await removeSessionWorktree(meta.worktree, { pushed: shippedHead(meta) });
+        if (!result.removed && !result.unregistered) why = keptBecause(result);
+      } catch (err) {
+        why = firstLine(err);
+      }
+    }
+    if (why !== undefined) {
       // Tried again every round; said once, and again only if the reason changes.
-      const why = keptBecause(result);
       if (this.keptWorktrees.get(meta.id) !== why) console.warn(`[mypi-server] Kept the worktree of ${meta.id} after its PR closed: ${why}`);
       this.keptWorktrees.set(meta.id, why);
       return;
