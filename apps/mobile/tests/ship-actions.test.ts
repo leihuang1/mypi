@@ -208,8 +208,12 @@ it("keeps an answered question gone and a newer one shown, in whatever order sum
   two.state.applySummary({ id: "s1", updatedAt: 2, status: "needs_you", question: { text: "Deploy now?", id: 9 } });
   await two.state.handleAnswer("yes");
   two.state.applySummary({ id: "s1", updatedAt: 3, status: "done" });
-  // Its status and question are out of date; the rest is applied.
-  const kept = two.state.applySummary({ ...asked, updatedAt: 3, name: "Renamed" });
+  two.state.applySummary({ id: "s1", updatedAt: 3, status: "done", name: "New title" });
+  // As late as what's shown: nothing in it is newer, the old title neither.
+  assert.equal(two.state.applySummary({ ...asked, updatedAt: 3, name: "Old title" }), undefined);
+  assert.equal(two.updates.at(-1).name, "New title");
+  // Later than that: its status and question are out of date, and the rest is applied.
+  const kept = two.state.applySummary({ ...asked, updatedAt: 4, name: "Renamed" });
   assert.deepEqual([kept.status, kept.question, kept.name], ["done", undefined, "Renamed"]);
 
   // Renamed while the answer is still queued: the daemon's reply still has the question, and the new name shows.
@@ -233,9 +237,13 @@ it("keeps an answered question gone and a newer one shown, in whatever order sum
   await answering44;
   assert.equal(early.state.sessionRef.current.question?.id, 5);
   // A Retry of a withdrawn answer: the daemon says it went unanswered, so the question still stands.
-  const retried = screen({ sendMessage: async () => ({ submissionId: 45, status: "unanswered" }) }, asked);
+  const retried = screen({ sendMessage: async () => ({ submissionId: 45, status: "unanswered", placed: false }) }, asked);
   await retried.state.handleAnswer("tabs");
   assert.equal(retried.state.sessionRef.current.question?.id, 5);
+  // But one that was read and whose run then failed answered it: the question goes.
+  const failed = screen({ sendMessage: async () => ({ submissionId: 46, status: "unanswered", placed: true }) }, asked);
+  await failed.state.handleAnswer("tabs");
+  assert.equal(failed.state.sessionRef.current.question, undefined);
 
   // A read from before the daemon took the answer, stamped as late as the answer, arriving after the run's own
   // summary: it still shows the answered question, so its chips stay gone.
@@ -248,7 +256,8 @@ it("keeps an answered question gone and a newer one shown, in whatever order sum
   const { state, updates } = screen({}, asked);
   await state.handleAnswer("tabs");
   assert.equal(updates.at(-1).question, undefined);
-  assert.deepEqual([state.applySummary({ ...asked })?.status, updates.at(-1).status], ["running", "running"]);
+  assert.equal(state.applySummary({ ...asked }), undefined, "as late as the answer: nothing newer in it");
+  assert.equal(updates.at(-1).status, "running");
   assert.equal(updates.at(-1).question, undefined);
 
   // Two summaries before a rerender: the older second one is dropped.

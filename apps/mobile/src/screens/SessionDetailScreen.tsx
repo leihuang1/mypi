@@ -305,12 +305,13 @@ export function SessionDetailScreen({
 
   /**
    * Apply a summary from the daemon, unless it's older than one already applied (a slow read, a late snapshot).
-   * One still showing a question answered here (whatever its timestamp) has an out-of-date status and question: the
-   * ones already shown stay, and the rest (a new title) is applied. Returns what was applied.
+   * One still showing a question answered here has an out-of-date status and question: the ones already shown stay,
+   * and the rest (a new title) is applied only if it's newer than what's shown. Returns what was applied.
    */
   const applySummary = (incoming: SessionSummary): SessionSummary | undefined => {
     if (incoming.id !== sessionRef.current.id || incoming.updatedAt < sessionRef.current.updatedAt) return undefined;
     const stale = incoming.question?.id !== undefined && answeredRef.current.has(incoming.question.id);
+    if (stale && incoming.updatedAt === sessionRef.current.updatedAt) return undefined;
     const { status, question } = sessionRef.current;
     const updated = stale ? { ...incoming, status, question } : incoming;
     // Now, not at the next render: a second summary in the same batch is compared with this one.
@@ -500,7 +501,8 @@ export function SessionDetailScreen({
       saveSessionView(viewKey, { failedDraft: null });
       // Answered: that question goes wherever it still shows, and the summary is read again. A newer question stays.
       // Not if the answer was withdrawn already (before this response, or before this retry).
-      const withdrawn = sent?.status === "unanswered" || (sent !== undefined && withdrawnRef.current.has(sent.submissionId));
+      const withdrawn = (sent?.status === "unanswered" && !sent.placed) ||
+        (sent !== undefined && withdrawnRef.current.has(sent.submissionId));
       if (answers !== undefined && !withdrawn && mountedRef.current && currentSessionIdRef.current === targetSessionId) {
         answeredRef.current.set(answers, sent?.submissionId);
         if (sessionRef.current.question?.id === answers) {
