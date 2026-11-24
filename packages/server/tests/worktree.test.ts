@@ -487,6 +487,32 @@ it("puts git's metadata back after a failure before the move, even if git's gc r
   assert.ok(git(repo, "worktree", "list", "--porcelain").includes(wt.path));
 });
 
+it("keeps an old detached commit even if git's gc runs just as the metadata moves", async () => {
+  const { dir, repo } = fixture("old-detached");
+  const wt = (await createSessionWorktree(repo, path.join(dir, "worktrees"), "o1"))!;
+  git(wt.path, "checkout", "-q", "--detach");
+  write(path.join(wt.path, "o.txt"), "o\n");
+  git(wt.path, "add", "-A");
+  git(wt.path, "commit", "-qm", "old detached");
+  const old = git(wt.path, "rev-parse", "HEAD");
+  // Three weeks old, past gc's two-week grace for objects nothing reaches.
+  const common = git(repo, "rev-parse", "--path-format=absolute", "--git-common-dir");
+  const aged = new Date(Date.now() - 21 * 86_400_000);
+  fs.utimesSync(path.join(common, "objects", old.slice(0, 2), old.slice(2)), aged, aged);
+  const rename = fs.renameSync;
+  fs.renameSync = ((from: fs.PathLike, to: fs.PathLike) => {
+    rename(from, to);
+    if (String(to).includes("mypi-retired")) execFileSync("git", ["gc", "-q"], { cwd: repo, stdio: "pipe" });
+  }) as typeof fs.renameSync;
+  try {
+    assert.equal((await removeSessionWorktree(wt, { force: true })).removed, true);
+  } finally {
+    fs.renameSync = rename;
+  }
+  assert.equal(git(repo, "rev-parse", `${wt.branch}-detached`), old);
+  assert.equal(git(repo, "log", "-1", "--format=%s", old), "old detached");
+});
+
 it("keeps a detached commit and a moved branch in SHA-256 and reftable repositories too", async () => {
   for (const format of [["--object-format=sha256"], ["--ref-format=reftable"]]) {
     const { dir, repo } = fixture(`format-${format[0].slice(2, 5)}`, format);

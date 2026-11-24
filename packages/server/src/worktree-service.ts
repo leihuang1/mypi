@@ -323,12 +323,22 @@ export async function removeSessionWorktree(
   let meta: string | undefined;
   let retired: string | undefined;
   let moved: string | undefined;
+  /** A detached HEAD no safe ref or branch has: kept on `<branch>-detached` (with its hash if that's taken). */
+  const keepDetached = async (head: string) => {
+    if (!head || (await backedUp(gitDir, head, safe)) ||
+      (await git(gitDir, ["branch", "--contains", head, "--format=%(refname)"]))) return;
+    const taken = await hasRef(gitDir, `refs/heads/${worktree.branch}-detached`);
+    await git(gitDir, ["branch", `${worktree.branch}-detached${taken ? `-${head.slice(0, 8)}` : ""}`, head]);
+  };
   if (registered) {
     const common = await git(gitDir, ["rev-parse", "--path-format=absolute", "--git-common-dir"]);
     meta = metadataDir(common, registered.dir);
     if (!meta) throw new Error(`Can't find git's metadata for the worktree at ${registered.dir}`);
     const refused = refusal(meta);
     if (refused) return kept(refused);
+    // Kept before the metadata moves: until then the worktree's HEAD is what keeps an old detached commit from
+    // git's gc, and from then on nothing does.
+    await keepDetached(await git(gitDir, ["--git-dir", meta, "rev-parse", "--verify", "--quiet", "HEAD^{commit}"]).catch(() => ""));
     retired = path.join(common, "mypi-retired", `${path.basename(meta)}-${Date.now()}`);
     fs.mkdirSync(path.dirname(retired), { recursive: true });
     fs.renameSync(meta, retired);
@@ -362,11 +372,7 @@ export async function removeSessionWorktree(
     if (retired && !head && !(await git(gitDir, ["--git-dir", retired, "symbolic-ref", "-q", "HEAD"]).then(() => true, () => false))) {
       throw new Error(`Can't read the HEAD of the worktree at ${checkout}`);
     }
-    if (head && !(await backedUp(gitDir, head, safe)) &&
-      !(await git(gitDir, ["branch", "--contains", head, "--format=%(refname)"]))) {
-      const taken = await hasRef(gitDir, `refs/heads/${worktree.branch}-detached`);
-      await git(gitDir, ["branch", `${worktree.branch}-detached${taken ? `-${head.slice(0, 8)}` : ""}`, head]);
-    }
+    await keepDetached(head); // one made since, too new for gc to collect
     if (fs.existsSync(checkout) && options.force) {
       fs.rmSync(checkout, { recursive: true, force: true });
     } else if (fs.existsSync(checkout)) {
