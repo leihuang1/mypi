@@ -224,6 +224,7 @@ it("archives a session once its PR is merged, even after GitHub deleted its bran
     const merged = await mgr.createSession({ cwd: repo });
     commit(merged.worktreePath!, "g.txt", "g\n");
     await mgr.shipSession(merged.id, { message: "g" });
+    const mergedHead = git(merged.worktreePath!, "rev-parse", "HEAD");
     const busy = await mgr.createSession({ cwd: repo });
     commit(busy.worktreePath!, "h.txt", "h\n");
     await mgr.shipSession(busy.id, { message: "h" });
@@ -234,6 +235,10 @@ it("archives a session once its PR is merged, even after GitHub deleted its bran
     git(repo, "fetch", "-q", "--prune", "origin");
     assert.equal(exists(repo, `refs/remotes/origin/${merged.branch}`), false);
     fs.writeFileSync(path.join(root, "pr-state"), "MERGED");
+    // Without the head GitHub merged, Ship's old head proves nothing: kept, and asked again.
+    await mgr.checkPullRequests();
+    assert.deepEqual([(await mgr.getSessionSummary(merged.id)).status, fs.existsSync(merged.worktreePath!)], ["done", true]);
+    fs.writeFileSync(path.join(root, "pr-head"), mergedHead);
     await mgr.checkPullRequests();
 
     const after = await mgr.getSessionSummary(merged.id);
@@ -251,6 +256,7 @@ it("archives a session once its PR is merged, even after GitHub deleted its bran
     assert.equal(fs.existsSync(busy.worktreePath!), false);
   } finally {
     fs.rmSync(path.join(root, "pr-state"));
+    fs.rmSync(path.join(root, "pr-head"), { force: true });
     await mgr.close();
   }
 });
@@ -274,6 +280,13 @@ it("archives on request: warns about work first, keeps unpushed commits on the b
     assert.equal(fs.existsSync(wt), false);
     assert.ok(exists(repo, `refs/heads/${session.branch}`), "the unpushed commit stays on its branch");
     assert.equal(git(repo, "log", "-1", "--format=%s", session.branch!), "edit i.txt");
+
+    // A change already under way holds Archive off until it's done.
+    const other = await mgr.createSession({ cwd: repo });
+    const resetting = mgr.resetSession(other.id);
+    await assert.rejects(mgr.archiveSession(other.id, { force: true }), /正在更新/);
+    await resetting;
+    assert.equal((await mgr.archiveSession(other.id, {})).archived, true);
 
     const readOnly = (err: Error & { status?: number }) => err.status === 409 && /已归档/.test(err.message);
     await assert.rejects(mgr.sendMessage(session.id, { requestId: "r", content: "more" }), readOnly);
@@ -434,6 +447,15 @@ it("cleans up only what is safe: not while the agent works, not a closed PR's fo
     await mgr.checkPullRequests();
     assert.ok(fs.existsSync(replaced.worktreePath!));
     assert.ok(exists(repo, `refs/heads/${replaced.branch}`));
+
+    // Closed while this clone's tracking ref is stale (the laptop force-pushed it away): the worktree may go, the branch stays.
+    const stale = await mgr.createSession({ cwd: repo });
+    commit(stale.worktreePath!, "s.txt", "only here too\n");
+    await mgr.shipSession(stale.id, { message: "s" });
+    git(remote, "update-ref", `refs/heads/${stale.branch}`, git(remote, "rev-parse", "main"));
+    await mgr.checkPullRequests();
+    assert.equal((await mgr.getSessionSummary(stale.id)).status, "archived");
+    assert.equal(git(repo, "log", "-1", "--format=%s", stale.branch!), "edit s.txt");
 
     // Closed while work blocked cleanup, then reopened: it's asked again, and stays.
     const reopened = await mgr.createSession({ cwd: repo });

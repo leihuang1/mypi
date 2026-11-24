@@ -80,7 +80,7 @@ interface CatalogEntry {
   worktree?: SessionWorktree;
   /** The draft PR Ship opened; when it last shipped, and the commit it pushed. */
   /** `input`: the last message sent when it was shipped; a message after it means new work. */
-  pr?: PullRequestInfo & { shippedAt: number; head?: string; input?: number };
+  pr?: PullRequestInfo & { shippedAt: number; head?: string; input?: number; mergedHead?: string };
   /** Archived by the user, or after the PR was merged or closed. Read-only from then on. */
   archivedAt?: number;
   /** When the user last sent a message: work after the last Ship means the session isn't "shipped" any more. */
@@ -140,11 +140,11 @@ function firstLine(err: unknown): string {
 }
 
 /**
- * A commit known to be on GitHub, for when the PR's branch is gone: only a merged PR's head (squash or rebase
- * merges leave its commits on no branch). A closed PR's commits may have been force-pushed away.
+ * A commit known to be on GitHub, for when the PR's branch is gone: only the head GitHub says it merged (squash or
+ * rebase merges leave its commits on no branch). Not Ship's head: commits may have been force-pushed away since.
  */
 function shippedHead(meta: CatalogEntry): string | undefined {
-  return meta.pr?.state === "merged" ? meta.pr.head : undefined;
+  return meta.pr?.state === "merged" ? meta.pr.mergedHead : undefined;
 }
 
 /** A task is running or an input is placed. A queued input with neither is stuck behind a failed run (see status). */
@@ -178,7 +178,7 @@ export class HarnessManager {
   private claim(sessionId: string, what: "发布" | "归档" | "清理"): () => void {
     const held = this.claims.get(sessionId);
     if (held) throw new ConflictError(`正在${held}中`);
-    if (this.admitting.has(sessionId)) throw new ConflictError("消息正在发送，稍后再试");
+    if (this.admitting.has(sessionId)) throw new ConflictError("会话正在更新，稍后再试");
     this.claims.set(sessionId, what);
     return () => this.claims.delete(sessionId);
   }
@@ -187,6 +187,23 @@ export class HarnessManager {
   private assertUnclaimed(sessionId: string, what: string): void {
     const held = this.claims.get(sessionId);
     if (held) throw new ConflictError(`正在${held}，等它结束再${what}`);
+  }
+
+  /**
+   * Run a change that can start work or rewrite the session (a message, settings, compaction, reset). Refused while
+   * a lifecycle step holds the session, and no claim can start until it's done.
+   */
+  private async admit<T>(meta: CatalogEntry, what: string, change: () => Promise<T>): Promise<T> {
+    assertWritable(meta);
+    this.assertUnclaimed(meta.id, what);
+    this.admitting.set(meta.id, (this.admitting.get(meta.id) ?? 0) + 1);
+    try {
+      return await change();
+    } finally {
+      const left = (this.admitting.get(meta.id) ?? 1) - 1;
+      if (left > 0) this.admitting.set(meta.id, left);
+      else this.admitting.delete(meta.id);
+    }
   }
 
   /** Whether the agent is working, for a step that removes things: failing to tell is an error, never "idle". */
@@ -834,52 +851,52 @@ export class HarnessManager {
       if (!meta) {
         throw new Error(`Session not found: ${sessionId}`);
       }
-      assertWritable(meta);
-      this.assertUnclaimed(sessionId, "改设置");
+      return this.admit(meta, "改设置", async () => {
 
-      if (req.name && req.name.trim()) {
-        meta.name = req.name.trim();
-      }
-      if (req.model) {
-        meta.model = req.model;
-      }
-      if (req.thinkingLevel) {
-        meta.thinkingLevel = req.thinkingLevel;
-      }
-      if (typeof req.ponytail === "boolean") {
-        meta.ponytail = req.ponytail;
-      }
-      if (req.cwd && req.cwd.trim()) {
-        const resolvedCwd = this.expandUserPath(req.cwd);
-        if (
-          !fs.existsSync(resolvedCwd) ||
-          !fs.statSync(resolvedCwd).isDirectory()
-        ) {
-          throw new Error(`Working directory does not exist: ${resolvedCwd}`);
+        if (req.name && req.name.trim()) {
+          meta.name = req.name.trim();
         }
-        // Real paths: a symlink in the worktree may lead back to the checkout, and /var is /private/var.
-        const relative = meta.worktree && path.relative(fs.realpathSync(meta.worktree.path), fs.realpathSync(resolvedCwd));
-        if (relative !== undefined && (relative === ".." || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative))) {
-          throw new Error(`This session works in its own worktree; its folder must stay inside ${meta.worktree!.path}`);
+        if (req.model) {
+          meta.model = req.model;
         }
-        meta.cwd = resolvedCwd;
-      }
-      meta.updatedAt = Date.now();
-      this.saveCatalog();
+        if (req.thinkingLevel) {
+          meta.thinkingLevel = req.thinkingLevel;
+        }
+        if (typeof req.ponytail === "boolean") {
+          meta.ponytail = req.ponytail;
+        }
+        if (req.cwd && req.cwd.trim()) {
+          const resolvedCwd = this.expandUserPath(req.cwd);
+          if (
+            !fs.existsSync(resolvedCwd) ||
+            !fs.statSync(resolvedCwd).isDirectory()
+          ) {
+            throw new Error(`Working directory does not exist: ${resolvedCwd}`);
+          }
+          // Real paths: a symlink in the worktree may lead back to the checkout, and /var is /private/var.
+          const relative = meta.worktree && path.relative(fs.realpathSync(meta.worktree.path), fs.realpathSync(resolvedCwd));
+          if (relative !== undefined && (relative === ".." || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative))) {
+            throw new Error(`This session works in its own worktree; its folder must stay inside ${meta.worktree!.path}`);
+          }
+          meta.cwd = resolvedCwd;
+        }
+        meta.updatedAt = Date.now();
+        this.saveCatalog();
 
-      const managed = await this.openManagedSession(meta);
-      if (req.model || req.thinkingLevel || req.cwd) {
-        await managed.root.configure(
-          {
-            model: req.model ?? meta.model,
-            thinkingLevel: req.thinkingLevel ?? meta.thinkingLevel,
-            cwd: meta.cwd,
-          },
-          BACKGROUND_CONTEXT,
-        );
-      }
+        const managed = await this.openManagedSession(meta);
+        if (req.model || req.thinkingLevel || req.cwd) {
+          await managed.root.configure(
+            {
+              model: req.model ?? meta.model,
+              thinkingLevel: req.thinkingLevel ?? meta.thinkingLevel,
+              cwd: meta.cwd,
+            },
+            BACKGROUND_CONTEXT,
+          );
+        }
 
-      return this.buildSessionSummary(meta);
+        return this.buildSessionSummary(meta);
+      });
     });
   }
 
@@ -947,16 +964,7 @@ export class HarnessManager {
       if (!meta) {
         throw new Error(`Session not found: ${sessionId}`);
       }
-      assertWritable(meta);
-      this.assertUnclaimed(sessionId, "发消息");
-      this.admitting.set(sessionId, (this.admitting.get(sessionId) ?? 0) + 1);
-      try {
-        return await this.admitMessage(meta, req);
-      } finally {
-        const left = (this.admitting.get(sessionId) ?? 1) - 1;
-        if (left > 0) this.admitting.set(sessionId, left);
-        else this.admitting.delete(sessionId);
-      }
+      return this.admit(meta, "发消息", () => this.admitMessage(meta, req));
     });
   }
 
@@ -1118,22 +1126,36 @@ export class HarnessManager {
       await this.trackOp(async () => {
         for (const meta of [...this.catalog.sessions]) {
           if (this.closing) return;
-          if (!meta.pr || meta.archivedAt || this.claims.has(meta.id)) continue;
-          // Merged is final; a closed PR can be reopened, so it's asked again until its worktree is gone.
-          if (meta.pr.state !== "merged") {
-            const pr = await pullRequestState(meta.pr.url).catch((err) => {
-              console.warn(`[mypi-server] Could not check ${meta.pr?.url}: ${firstLine(err)}`);
-              return undefined;
+          const asked = meta.pr;
+          if (!asked || meta.archivedAt) continue;
+          // Asked until the worktree is gone: a closed PR can be reopened, and a merged one's head may be unknown yet.
+          const answer = asked.state === "merged" && asked.mergedHead ? undefined
+            : await pullRequestState(asked.url).catch((err) => {
+              console.warn(`[mypi-server] Could not check ${asked.url}: ${firstLine(err)}`);
+              return null;
             });
-            if (!pr || !meta.pr) continue;
-            if (pr.state !== meta.pr.state) {
-              // What GitHub merged, which may include commits pushed from elsewhere, replaces what Ship pushed.
-              meta.pr = { ...meta.pr, state: pr.state, ...(pr.state === "merged" && pr.head ? { head: pr.head } : {}) };
-              this.saveCatalog();
-            }
-            if (pr.state === "open") continue;
+          if (answer === null) continue;
+          let release: () => void;
+          try {
+            release = this.claim(meta.id, "清理");
+          } catch {
+            continue; // Ship, Archive or a change is under way: next round
           }
-          await this.cleanUp(meta).catch((err) => console.warn(`[mypi-server] Kept the worktree of ${meta.id}: ${firstLine(err)}`));
+          try {
+            // Only about the PR asked about, of a session still here: a Ship meanwhile may have opened another.
+            if (this.closing || meta.archivedAt || meta.pr !== asked || !this.catalog.sessions.includes(meta)) continue;
+            if (answer) {
+              const mergedHead = answer.state === "merged" ? answer.head : undefined;
+              if (answer.state !== asked.state || mergedHead !== asked.mergedHead) {
+                meta.pr = { ...asked, state: answer.state, mergedHead };
+                this.saveCatalog();
+              }
+              if (answer.state === "open") continue;
+            }
+            await this.cleanUp(meta).catch((err) => console.warn(`[mypi-server] Kept the worktree of ${meta.id}: ${firstLine(err)}`));
+          } finally {
+            release();
+          }
         }
       });
     } finally {
@@ -1141,19 +1163,20 @@ export class HarnessManager {
     }
   }
 
-  /** After its PR was merged or closed: remove the worktree and archive, unless the agent is at it or left work. */
+  /**
+   * After its PR was merged or closed, with the session claimed: remove the worktree and archive, unless the agent is
+   * at it or left work. A closed PR's branch stays: its commits may be gone from GitHub even if a stale tracking ref
+   * still has them.
+   */
   private async cleanUp(meta: CatalogEntry): Promise<void> {
-    const release = this.claim(meta.id, "清理");
-    try {
-      if (this.closing || meta.archivedAt || (await this.isRunning(meta))) return;
-      const result = meta.worktree ? await removeSessionWorktree(meta.worktree, { pushed: shippedHead(meta) }) : { removed: true };
-      if (!result.removed) return;
-      meta.archivedAt = Date.now();
-      meta.updatedAt = meta.archivedAt;
-      this.saveCatalog();
-    } finally {
-      release();
-    }
+    if (await this.isRunning(meta)) return;
+    const result = meta.worktree
+      ? await removeSessionWorktree(meta.worktree, { pushed: shippedHead(meta), keepBranch: meta.pr?.state === "closed" })
+      : { removed: true };
+    if (!result.removed) return;
+    meta.archivedAt = Date.now();
+    meta.updatedAt = meta.archivedAt;
+    this.saveCatalog();
   }
 
   async compactSession(
@@ -1165,19 +1188,19 @@ export class HarnessManager {
       if (!meta) {
         throw new Error(`Session not found: ${sessionId}`);
       }
-      assertWritable(meta);
-      this.assertUnclaimed(sessionId, "压缩");
-      const managed = await this.openManagedSession(meta);
-      const taskId = await managed.root.compact(
-        req?.instructions?.trim() || undefined,
-        BACKGROUND_CONTEXT,
-      );
-      meta.updatedAt = Date.now();
-      this.saveCatalog();
-      return {
-        taskId: Number(taskId),
-        status: "started",
-      };
+      return this.admit(meta, "压缩", async () => {
+        const managed = await this.openManagedSession(meta);
+        const taskId = await managed.root.compact(
+          req?.instructions?.trim() || undefined,
+          BACKGROUND_CONTEXT,
+        );
+        meta.updatedAt = Date.now();
+        this.saveCatalog();
+        return {
+          taskId: Number(taskId),
+          status: "started",
+        };
+      });
     });
   }
 
@@ -1190,20 +1213,20 @@ export class HarnessManager {
       if (!meta) {
         throw new Error(`Session not found: ${sessionId}`);
       }
-      assertWritable(meta);
-      this.assertUnclaimed(sessionId, "重置");
-      const managed = await this.openManagedSession(meta);
-      this.notifications.stopSession(sessionId);
-      await managed.root.reset(
-        req?.handoff?.trim() || undefined,
-        BACKGROUND_CONTEXT,
-      );
-      delete meta.lastInput; // the new context hasn't run
-      meta.updatedAt = Date.now();
-      this.saveCatalog();
-      return {
-        status: "reset",
-      };
+      return this.admit(meta, "重置", async () => {
+        const managed = await this.openManagedSession(meta);
+        this.notifications.stopSession(sessionId);
+        await managed.root.reset(
+          req?.handoff?.trim() || undefined,
+          BACKGROUND_CONTEXT,
+        );
+        delete meta.lastInput; // the new context hasn't run
+        meta.updatedAt = Date.now();
+        this.saveCatalog();
+        return {
+          status: "reset",
+        };
+      });
     });
   }
 

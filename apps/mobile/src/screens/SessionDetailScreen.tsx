@@ -708,7 +708,7 @@ export function SessionDetailScreen({
       const what = [
         result.uncommitted > 0 ? `${result.uncommitted} 个未提交的改动会被丢弃` : "",
         result.ignored > 0 ? `${result.ignored} 个被忽略的文件（如 .env）会被删除` : "",
-        result.unpushed > 0 ? `${result.unpushed} 个未推送的提交会留在分支 ${session.branch} 上` : "",
+        result.unpushed > 0 ? `${result.unpushed} 个未推送的提交会留在本地分支 ${session.branch} 上（游离 HEAD 上的提交在 ${session.branch}-detached）` : "",
       ].filter(Boolean).join("\n");
       Alert.alert("归档这个会话？", `${what}\n归档后会话只能查看。`, [
         { text: "取消", style: "cancel" },

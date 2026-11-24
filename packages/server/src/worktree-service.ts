@@ -12,14 +12,14 @@ export interface SessionWorktree {
   /** Root of the checkout `sourceCwd` is in, which may itself be a worktree that goes away. */
   repoPath: string;
   /** The repository's shared git directory, which outlives every checkout: git maintenance runs here. */
-  gitDir: string;
+  gitDir?: string;
   /** Root of the worktree. */
   path: string;
   branch: string;
   /** What the branch started from, and what its changes are measured against. */
   baseRef: string;
   /** The commit it started at: a base that can't move or vanish, for when `baseRef` does. */
-  baseCommit: string;
+  baseCommit?: string;
 }
 
 /** What a worktree holds that exists nowhere else. */
@@ -48,10 +48,11 @@ export function gitEnv(extra: Record<string, string> = {}): NodeJS.ProcessEnv {
 export const networkEnv = () => gitEnv({ GIT_TERMINAL_PROMPT: "0", GCM_INTERACTIVE: "never" });
 
 // Regenerable output that cleanup may delete with a worktree. Any other ignored file counts as work.
+// Dependencies, build output and tool caches only; an ignored log or data file may be the only record of something.
 const DISPOSABLE = new Set(["node_modules", ".venv", "venv", "__pycache__", ".pytest_cache", ".mypy_cache", ".ruff_cache",
-  "dist", "build", "out", "target", ".next", ".nuxt", ".turbo", ".cache", ".parcel-cache", "coverage", ".gradle",
+  "dist", "build", "target", ".next", ".nuxt", ".turbo", ".cache", ".parcel-cache", "coverage", ".gradle",
   ".DS_Store"]);
-const DISPOSABLE_FILE = /\.(log|pyc|tsbuildinfo)$/;
+const DISPOSABLE_FILE = /\.(pyc|tsbuildinfo)$/;
 
 function disposable(ignoredPath: string): boolean {
   const parts = ignoredPath.replace(/\/$/, "").split("/");
@@ -150,9 +151,12 @@ export function worktreeCwd(worktree: SessionWorktree): string {
   return fs.existsSync(dir) ? dir : worktree.path;
 }
 
+/** Where git maintenance runs: the shared git directory (catalogs from before it was recorded: the checkout). */
+const gitDirOf = (worktree: SessionWorktree) => worktree.gitDir ?? worktree.repoPath;
+
 /** The worktree's registration and its HEAD, which git keeps even when the folder was deleted by hand. */
 async function registration(worktree: SessionWorktree): Promise<{ head?: string } | undefined> {
-  const list = await git(worktree.gitDir, ["worktree", "list", "--porcelain"]);
+  const list = await git(gitDirOf(worktree), ["worktree", "list", "--porcelain"]);
   const target = path.resolve(worktree.path);
   const real = fs.existsSync(target) ? fs.realpathSync(target) : target;
   for (const entry of list.split("\n\n")) {
@@ -177,10 +181,10 @@ export async function worktreeWork(worktree: SessionWorktree, pushed?: string): 
   // The branch, and the worktree's own HEAD (the agent may have switched or detached), against everything backed up.
   const tips: string[] = [];
   const head = (await registration(worktree))?.head;
-  for (const tip of [`refs/heads/${worktree.branch}`, head]) if (tip && (await hasRef(worktree.gitDir, tip))) tips.push(tip);
+  for (const tip of [`refs/heads/${worktree.branch}`, head]) if (tip && (await hasRef(gitDirOf(worktree), tip))) tips.push(tip);
   const known: string[] = [];
-  for (const ref of [worktree.baseRef, worktree.baseCommit, pushed]) if (ref && (await hasRef(worktree.gitDir, ref))) known.push(ref);
-  const unpushed = tips.length === 0 ? "0" : await git(worktree.gitDir, ["rev-list", "--count", ...tips, "--not", "--remotes", ...known]);
+  for (const ref of [worktree.baseRef, worktree.baseCommit, pushed]) if (ref && (await hasRef(gitDirOf(worktree), ref))) known.push(ref);
+  const unpushed = tips.length === 0 ? "0" : await git(gitDirOf(worktree), ["rev-list", "--count", ...tips, "--not", "--remotes", ...known]);
   return {
     exists,
     uncommitted: records.length - ignored.length,
@@ -192,31 +196,32 @@ export async function worktreeWork(worktree: SessionWorktree, pushed?: string): 
 /**
  * Remove the worktree and its branch when they hold nothing that exists elsewhere; otherwise leave both, so work is
  * never lost. `force` (an Archive the user confirmed) removes the worktree with its uncommitted and ignored files, but
- * still keeps a branch with unpushed commits. A locked worktree stays. Throws, removing nothing, when that can't be
- * checked.
+ * still keeps a branch with unpushed commits. `keepBranch`: remove only the worktree. A locked worktree stays. Throws,
+ * removing nothing, when that can't be checked.
  */
 export async function removeSessionWorktree(
   worktree: SessionWorktree,
-  options: { force?: boolean; pushed?: string } = {},
+  options: { force?: boolean; pushed?: string; keepBranch?: boolean } = {},
 ): Promise<{ removed: boolean; branchDeleted: boolean; work: WorktreeWork }> {
   const work = await worktreeWork(worktree, options.pushed);
   if (!options.force && work.uncommitted + work.ignored + work.unpushed > 0) return { removed: false, branchDeleted: false, work };
   const registered = await registration(worktree);
   if (registered?.head && work.unpushed > 0 &&
-    !(await git(worktree.gitDir, ["branch", "--contains", registered.head, "--format=%(refname)"]))) {
+    !(await git(gitDirOf(worktree), ["branch", "--contains", registered.head, "--format=%(refname)"]))) {
     // Commits on a detached HEAD go with the worktree's HEAD: keep them on a branch of their own.
-    await git(worktree.gitDir, ["branch", `${worktree.branch}-detached`, registered.head]);
+    await git(gitDirOf(worktree), ["branch", `${worktree.branch}-detached`, registered.head]);
   }
   if (registered) {
-    // --force also covers a folder deleted by hand (its registration remains) and disposable ignored files; a single
-    // --force still refuses a locked worktree.
-    await git(worktree.gitDir, ["worktree", "remove", "--force", worktree.path]).catch(() => "");
+    // Without --force, git checks once more and refuses if a file appeared since the count above. --force only when
+    // the user confirmed, or the folder is already gone (its registration remains); it still refuses a locked one.
+    const force = options.force || !work.exists ? ["--force"] : [];
+    await git(gitDirOf(worktree), ["worktree", "remove", ...force, worktree.path]).catch(() => "");
     if (await registration(worktree)) return { removed: false, branchDeleted: false, work };
   } else if (work.exists) {
     return { removed: false, branchDeleted: false, work }; // a folder git doesn't know as this worktree: not ours to delete
   }
-  if (work.unpushed > 0) return { removed: true, branchDeleted: false, work };
+  if (work.unpushed > 0 || options.keepBranch) return { removed: true, branchDeleted: false, work };
   // -D: a squash- or rebase-merged branch is not an ancestor of anything, yet nothing on it is unpushed.
-  await git(worktree.gitDir, ["branch", "-D", worktree.branch]).catch(() => "");
-  return { removed: true, branchDeleted: !(await hasRef(worktree.gitDir, `refs/heads/${worktree.branch}`)), work };
+  await git(gitDirOf(worktree), ["branch", "-D", worktree.branch]).catch(() => "");
+  return { removed: true, branchDeleted: !(await hasRef(gitDirOf(worktree), `refs/heads/${worktree.branch}`)), work };
 }

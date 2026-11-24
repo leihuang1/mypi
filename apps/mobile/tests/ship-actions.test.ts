@@ -99,7 +99,7 @@ it("archives at once when there's no work, and asks first when there is", async 
   await state.handleArchive();
   assert.deepEqual(plain(calls), [{ force: false }]);
   assert.equal(alerts.length, 1);
-  assert.match(alerts[0].message, /1 个未提交的改动会被丢弃\n1 个被忽略的文件（如 .env）会被删除\n2 个未推送的提交会留在分支 mypi\/s1 上/);
+  assert.match(alerts[0].message, /1 个未提交的改动会被丢弃\n1 个被忽略的文件（如 .env）会被删除\n2 个未推送的提交会留在本地分支 mypi\/s1 上（游离 HEAD 上的提交在 mypi\/s1-detached）/);
   assert.equal(state.topSheet, "ship", "nothing happened yet");
   alerts[0].buttons.find((b) => b.text === "归档")!.onPress!();
   await tick();

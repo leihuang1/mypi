@@ -269,3 +269,24 @@ it("keeps work that git status doesn't show, and survives the checkout or the ba
   assert.ok(hasBranch(repo, g.branch) && !hasBranch(other, g.branch));
   assert.ok("GIT_DIR" in shell && shell.GIT_DIR === undefined && shell.GIT_WORK_TREE === undefined, "nor does the agent's shell");
 });
+
+it("lets git check once more before removing: a file written after the count stays", async () => {
+  const { dir, repo } = fixture("late");
+  const wt = (await createSessionWorktree(repo, path.join(dir, "worktrees"), "l1"))!;
+  // A git that writes a file into the worktree right after reporting it clean, like an editor saving at that moment.
+  const bin = path.join(dir, "bin");
+  write(path.join(bin, "git"), `#!/bin/sh\n/usr/bin/git "$@"\nrc=$?\ncase "$*" in *"status --porcelain"*) echo late > "${wt.path}/late.txt";; esac\nexit $rc\n`);
+  fs.chmodSync(path.join(bin, "git"), 0o755);
+  const savedPath = process.env.PATH;
+  process.env.PATH = `${bin}:${savedPath}`;
+  try {
+    assert.equal((await removeSessionWorktree(wt)).removed, false);
+  } finally {
+    process.env.PATH = savedPath;
+  }
+  assert.equal(fs.readFileSync(path.join(wt.path, "late.txt"), "utf8"), "late\n");
+  // A catalog entry from before gitDir and baseCommit were recorded still works, from the checkout.
+  git(wt.path, "add", "-A");
+  git(wt.path, "commit", "-qm", "late");
+  assert.equal((await worktreeWork({ ...wt, gitDir: undefined, baseCommit: undefined })).unpushed, 1);
+});
