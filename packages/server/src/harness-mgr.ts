@@ -197,12 +197,12 @@ export class HarnessManager {
   private toolEnvs = new Map<string, NodeExecutionEnv>();
   /** Sessions with a Ship in progress: one at a time each. */
   /** Ship, Archive or the PR watcher's cleanup, at most one per session: nothing else starts work meanwhile. */
-  private claims = new Map<string, "发布" | "归档" | "清理">();
+  private claims = new Map<string, "发布" | "归档" | "清理" | "删除">();
   /** Messages being submitted, per session: a claim waits for them to land, and they for the claim. */
   private admitting = new Map<string, number>();
 
   /** Claim the session for a lifecycle step; the returned function releases it. */
-  private claim(sessionId: string, what: "发布" | "归档" | "清理"): () => void {
+  private claim(sessionId: string, what: "发布" | "归档" | "清理" | "删除"): () => void {
     const held = this.claims.get(sessionId);
     if (held) throw new ConflictError(`正在${held}中`);
     if (this.admitting.has(sessionId)) throw new ConflictError("会话正在更新，稍后再试");
@@ -934,53 +934,64 @@ export class HarnessManager {
       if (idx === -1) {
         throw new Error(`Session not found: ${sessionId}`);
       }
-      this.assertUnclaimed(sessionId, "删除");
-      const [meta] = this.catalog.sessions.splice(idx, 1);
-      this.saveCatalog();
-
-      const active = this.activeSessions.get(meta.id);
-      if (active) {
-        this.activeSessions.delete(meta.id);
-        try {
-          const managed = await active;
-          this.notifications.stopSession(sessionId);
-          await managed.stopNotifications();
-          await managed.root.abort(BACKGROUND_CONTEXT, { background: true });
-          await managed.harness.close(BACKGROUND_CONTEXT);
-        } catch {
-          // Ignore close errors
-        }
+      // Claimed like Archive: not while Ship or cleanup runs, nor while a change admitted earlier is still going (it
+      // would reopen the session after it's gone).
+      const release = this.claim(sessionId, "删除");
+      try {
+        await this.removeSession(sessionId);
+      } finally {
+        release();
       }
-
-      for (const key of this.toolEnvs.keys()) {
-        if (key.startsWith(`${meta.id}\0`)) this.toolEnvs.delete(key);
-      }
-
-      if (meta.worktree) {
-        try {
-          const { removed, work } = await removeSessionWorktree(meta.worktree, { pushed: shippedHead(meta) });
-          if (!removed) {
-            console.warn(`[mypi-server] Kept ${meta.worktree.path} and ${meta.worktree.branch} of deleted session ${meta.id}: ` +
-              `${work.uncommitted} uncommitted path(s), ${work.unpushed} unpushed commit(s)`);
-          }
-        } catch (err) {
-          console.error(`[mypi-server] Could not remove the worktree of deleted session ${meta.id}:`, err);
-        }
-      }
-
-      const sessionDir = path.join(this.dataDir, "sessions", meta.id);
-      const archiveDir = path.join(this.dataDir, "archive", meta.id);
-      if (fs.existsSync(sessionDir)) {
-        fs.mkdirSync(path.dirname(archiveDir), { recursive: true });
-        try {
-          fs.renameSync(sessionDir, archiveDir);
-        } catch {
-          // Ignore archive move error
-        }
-      }
-
       return { archived: true };
     });
+  }
+
+  /** Delete's work, under its claim: drop the session from the catalog, close it, remove its worktree, keep its transcript. */
+  private async removeSession(sessionId: string): Promise<void> {
+    const idx = this.catalog.sessions.findIndex((s) => s.id === sessionId);
+    const [meta] = this.catalog.sessions.splice(idx, 1);
+    this.saveCatalog();
+
+    const active = this.activeSessions.get(meta.id);
+    if (active) {
+      this.activeSessions.delete(meta.id);
+      try {
+        const managed = await active;
+        this.notifications.stopSession(sessionId);
+        await managed.stopNotifications();
+        await managed.root.abort(BACKGROUND_CONTEXT, { background: true });
+        await managed.harness.close(BACKGROUND_CONTEXT);
+      } catch {
+        // Ignore close errors
+      }
+    }
+
+    for (const key of this.toolEnvs.keys()) {
+      if (key.startsWith(`${meta.id}\0`)) this.toolEnvs.delete(key);
+    }
+
+    if (meta.worktree) {
+      try {
+        const { removed, work } = await removeSessionWorktree(meta.worktree, { pushed: shippedHead(meta) });
+        if (!removed) {
+          console.warn(`[mypi-server] Kept ${meta.worktree.path} and ${meta.worktree.branch} of deleted session ${meta.id}: ` +
+            `${work.uncommitted} uncommitted path(s), ${work.unpushed} unpushed commit(s)`);
+        }
+      } catch (err) {
+        console.error(`[mypi-server] Could not remove the worktree of deleted session ${meta.id}:`, err);
+      }
+    }
+
+    const sessionDir = path.join(this.dataDir, "sessions", meta.id);
+    const archiveDir = path.join(this.dataDir, "archive", meta.id);
+    if (fs.existsSync(sessionDir)) {
+      fs.mkdirSync(path.dirname(archiveDir), { recursive: true });
+      try {
+        fs.renameSync(sessionDir, archiveDir);
+      } catch {
+        // Ignore archive move error
+      }
+    }
   }
 
   async sendMessage(
@@ -1120,12 +1131,18 @@ export class HarnessManager {
         if (await this.isRunning(meta)) throw new ConflictError("Agent 还在工作，先停止再归档");
         let work = { uncommitted: 0, ignored: 0, unpushed: 0 };
         if (meta.worktree) {
-          // Only a literal true confirms: the removal itself checks again, so a file written since is never forced.
+          // Only a literal true confirms. Without it, the folder goes to trash, so a file written since isn't lost.
           const force = req.force === true;
           const result = await removeSessionWorktree(meta.worktree, { force, pushed: shippedHead(meta) });
           const { exists: _, ...found } = result.work;
           work = found;
-          if (!result.removed && !force) return { archived: false, ...work, session: await this.buildSessionSummary(meta) };
+          if (!result.removed && !force) {
+            // Nothing to warn about, yet git kept it (locked): confirming wouldn't be about losing work.
+            if (work.uncommitted + work.ignored + work.unpushed === 0) {
+              throw new ConflictError("git 不让移除这个工作区（可能被 git worktree lock 锁住了），先在电脑上处理");
+            }
+            return { archived: false, ...work, session: await this.buildSessionSummary(meta) };
+          }
           if (!result.removed) console.warn(`[mypi-server] Archived ${meta.id} but kept its locked worktree ${meta.worktree.path}`);
         }
         meta.archivedAt = Date.now();
@@ -1193,13 +1210,12 @@ export class HarnessManager {
 
   /**
    * After its PR was merged or closed, with the session claimed: remove the worktree and archive, unless the agent is
-   * at it or left work. A closed PR's branch stays: its commits may be gone from GitHub even if a stale tracking ref
-   * still has them.
+   * at it or left work. The branch goes only if GitHub merged its tip (a closed PR's commits may be gone from GitHub).
    */
   private async cleanUp(meta: CatalogEntry): Promise<void> {
     if (await this.isRunning(meta)) return;
     const result = meta.worktree
-      ? await removeSessionWorktree(meta.worktree, { pushed: shippedHead(meta), keepBranch: meta.pr?.state === "closed" })
+      ? await removeSessionWorktree(meta.worktree, { pushed: shippedHead(meta) })
       : { removed: true };
     if (!result.removed) return;
     meta.archivedAt = Date.now();

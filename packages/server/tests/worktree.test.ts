@@ -270,25 +270,61 @@ it("keeps work that git status doesn't show, and survives the checkout or the ba
   assert.ok("GIT_DIR" in shell && shell.GIT_DIR === undefined && shell.GIT_WORK_TREE === undefined, "nor does the agent's shell");
 });
 
-it("lets git check once more before removing: a file written after the count stays", async () => {
+it("loses nothing written after the count: late files go to trash, a late commit keeps its branch", async () => {
   const { dir, repo } = fixture("late");
-  const wt = (await createSessionWorktree(repo, path.join(dir, "worktrees"), "l1"))!;
-  // A git that writes a file into the worktree right after reporting it clean, like an editor saving at that moment.
+  const root = path.join(dir, "worktrees");
+  const wt = (await createSessionWorktree(repo, root, "l1"))!;
+  // A git that changes the worktree right after reporting on it, like an editor saving or the owner committing then.
   const bin = path.join(dir, "bin");
-  write(path.join(bin, "git"), `#!/bin/sh\n/usr/bin/git "$@"\nrc=$?\ncase "$*" in *"status --porcelain"*) echo late > "${wt.path}/late.txt";; esac\nexit $rc\n`);
-  fs.chmodSync(path.join(bin, "git"), 0o755);
-  const savedPath = process.env.PATH;
-  process.env.PATH = `${bin}:${savedPath}`;
-  try {
-    assert.equal((await removeSessionWorktree(wt)).removed, false);
-  } finally {
-    process.env.PATH = savedPath;
-  }
-  assert.equal(fs.readFileSync(path.join(wt.path, "late.txt"), "utf8"), "late\n");
+  const late = (after: string, then: string) => {
+    write(path.join(bin, "git"), `#!/bin/sh\n/usr/bin/git "$@"\nrc=$?\ncase "$*" in *"${after}"*) ${then};; esac\nexit $rc\n`);
+    fs.chmodSync(path.join(bin, "git"), 0o755);
+  };
+  const withShim = async <T>(run: () => Promise<T>): Promise<T> => {
+    const savedPath = process.env.PATH;
+    process.env.PATH = `${bin}:${savedPath}`;
+    try {
+      return await run();
+    } finally {
+      process.env.PATH = savedPath;
+      fs.rmSync(bin, { recursive: true, force: true });
+    }
+  };
+
+  // An untracked file and an ignored .env, both saved just after status: the folder goes to trash with them.
+  fs.appendFileSync(path.join(repo, ".git", "info", "exclude"), ".env\n");
+  late("status --porcelain", `echo late > "${wt.path}/late.txt"; echo SECRET=1 > "${wt.path}/.env"`);
+  assert.equal((await withShim(() => removeSessionWorktree(wt))).removed, true);
+  const [trashed] = fs.readdirSync(path.join(root, ".trash"));
+  assert.deepEqual(["late.txt", ".env"].map((f) => fs.readFileSync(path.join(root, ".trash", trashed, f), "utf8")), ["late\n", "SECRET=1\n"]);
+
+  // A commit made after the count: the branch moved, so it isn't deleted.
+  const wt2 = (await createSessionWorktree(repo, root, "l2"))!;
+  late("rev-list --count", `cd "${wt2.path}" && echo c > c.txt && /usr/bin/git add c.txt && /usr/bin/git commit -qm late`);
+  const result = await withShim(() => removeSessionWorktree(wt2));
+  assert.deepEqual([result.removed, result.branchDeleted], [true, false]);
+  assert.equal(git(repo, "log", "-1", "--format=%s", wt2.branch), "late");
+  // Even when the branch moves just after its tip was checked (the folder is in trash by then: another process moves
+  // it): the delete is conditional on that tip.
+  const wt5 = (await createSessionWorktree(repo, root, "l5"))!;
+  const b5 = `refs/heads/${wt5.branch}`;
+  late("merge-base --is-ancestor", `cd "${repo}" && n=$(/usr/bin/git commit-tree -p ${b5} -m later "${b5}^{tree}") && /usr/bin/git update-ref ${b5} $n`);
+  assert.equal((await withShim(() => removeSessionWorktree(wt5))).branchDeleted, false);
+  assert.equal(git(repo, "log", "-1", "--format=%s", wt5.branch), "later");
+
+  // Trash older than a week is emptied by the next removal.
+  const old = path.join(root, ".trash", `old-${Date.now() - 8 * 86_400_000}`);
+  fs.mkdirSync(old);
+  const wt3 = (await createSessionWorktree(repo, root, "l3"))!;
+  assert.equal((await removeSessionWorktree(wt3)).branchDeleted, true, "nothing but the base on it");
+  assert.equal(fs.existsSync(old), false);
+
   // A catalog entry from before gitDir and baseCommit were recorded still works, from the checkout.
-  git(wt.path, "add", "-A");
-  git(wt.path, "commit", "-qm", "late");
-  assert.equal((await worktreeWork({ ...wt, gitDir: undefined, baseCommit: undefined })).unpushed, 1);
+  const wt4 = (await createSessionWorktree(repo, root, "l4"))!;
+  write(path.join(wt4.path, "x.txt"), "x\n");
+  git(wt4.path, "add", "-A");
+  git(wt4.path, "commit", "-qm", "x");
+  assert.equal((await worktreeWork({ ...wt4, gitDir: undefined, baseCommit: undefined })).unpushed, 1);
 });
 
 it("keeps ignored files in build folders, finds a removed worktree under another spelling, and owns only its own rollback", async () => {
@@ -314,6 +350,34 @@ it("keeps ignored files in build folders, finds a removed worktree under another
   assert.equal((await worktreeWork(aliased)).unpushed, 1, "its HEAD is still found");
   assert.equal((await removeSessionWorktree(aliased, { force: true })).removed, true);
   assert.equal(git(repo, "log", "-1", "--format=%s", `${b.branch}-detached`), "detached");
+
+  // The whole worktrees folder deleted, under a symlinked path: found through the nearest folder still there. Then the
+  // symlink too: found by its folder name, which carries the session id.
+  const real = path.join(dir, "real");
+  fs.mkdirSync(real);
+  const link = path.join(dir, "link");
+  fs.symlinkSync(real, link);
+  const d = (await createSessionWorktree(repo, path.join(real, "wts"), "d4"))!;
+  const linked = { ...d, path: path.join(link, "wts", path.basename(d.path)) };
+  git(d.path, "checkout", "-q", "--detach");
+  write(path.join(d.path, "d4.md"), "d4\n");
+  git(d.path, "add", "-A");
+  git(d.path, "commit", "-qm", "detached d4");
+  fs.rmSync(path.join(real, "wts"), { recursive: true, force: true });
+  assert.equal((await worktreeWork(linked)).unpushed, 1, "through the link");
+  fs.rmSync(link);
+  assert.equal((await worktreeWork(linked)).unpushed, 1, "by name");
+  assert.equal((await removeSessionWorktree(linked, { force: true })).removed, true);
+  assert.equal(git(repo, "log", "-1", "--format=%s", `${d.branch}-detached`), "detached d4");
+
+  // A registration left behind (its folder deleted, its branch gone) is someone's: a create there is refused, and
+  // leaves it registered.
+  const e = (await createSessionWorktree(repo, wtRoot, "e5"))!;
+  git(e.path, "checkout", "-q", "--detach");
+  git(repo, "branch", "-D", e.branch);
+  fs.rmSync(e.path, { recursive: true, force: true });
+  await assert.rejects(createSessionWorktree(repo, wtRoot, "e5"), /already exists/);
+  assert.ok(git(repo, "worktree", "list", "--porcelain").includes(path.basename(e.path)));
 
   // A second create with the same id fails, and leaves the first one's branch and folder alone.
   const first = (await createSessionWorktree(repo, wtRoot, "c3"))!;

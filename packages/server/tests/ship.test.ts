@@ -308,6 +308,13 @@ it("archives on request: warns about work first, keeps unpushed commits on the b
     await resetting;
     assert.equal((await mgr.archiveSession(other.id, {})).archived, true);
 
+    // Locked with nothing in it: an error, not a confirmation that would seem to be about losing work.
+    const locked = await mgr.createSession({ cwd: repo });
+    git(repo, "worktree", "lock", locked.worktreePath!);
+    await assert.rejects(mgr.archiveSession(locked.id, {}), (err: Error & { status?: number }) => err.status === 409 && /锁住/.test(err.message));
+    assert.ok(fs.existsSync(locked.worktreePath!), "put back where it was");
+    git(repo, "worktree", "unlock", locked.worktreePath!);
+
     const readOnly = (err: Error & { status?: number }) => err.status === 409 && /已归档/.test(err.message);
     await assert.rejects(mgr.sendMessage(session.id, { requestId: "r", content: "more" }), readOnly);
     await assert.rejects(mgr.shipSession(session.id, {}), readOnly);
@@ -532,6 +539,81 @@ it("cleans up only what is safe: not while the agent works, not a closed PR's fo
   } finally {
     release(); // a failed check mustn't leave close() waiting on the agent
     for (const name of ["pr-state", "view-wait", "release"]) flag(name);
+    await mgr.close();
+  }
+});
+
+it("keeps every commit GitHub didn't merge, on every way out, and drops answers that are out of date", async () => {
+  const repo = path.join(root, "repo9");
+  git(root, "clone", "-q", "https://github.com/owner/repo.git", repo);
+  const dataDir = path.join(root, "data9");
+  const flag = (name: string, value?: string) => value === undefined
+    ? fs.rmSync(path.join(root, name), { force: true }) : fs.writeFileSync(path.join(root, name), value);
+  const mgr = manager(dataDir);
+  const held = async (during: () => Promise<unknown>) => {
+    flag("view-wait", "");
+    const checking = mgr.checkPullRequests();
+    await new Promise((resolve) => setTimeout(resolve, 300)); // gh is holding its answer
+    await during();
+    flag("release", "");
+    await checking;
+    flag("view-wait");
+    flag("release");
+  };
+  try {
+    // Archived by hand while its PR is open: the worktree goes, the pushed but unmerged branch stays.
+    const manual = await mgr.createSession({ cwd: repo });
+    commit(manual.worktreePath!, "m.txt", "m\n");
+    await mgr.shipSession(manual.id, { message: "m" });
+    assert.equal((await mgr.archiveSession(manual.id, {})).archived, true);
+    assert.equal(git(repo, "log", "-1", "--format=%s", manual.branch!), "edit m.txt");
+
+    // Delete waits for a change already under way, like Archive.
+    const other = await mgr.createSession({ cwd: repo });
+    const resetting = mgr.resetSession(other.id);
+    await assert.rejects(mgr.deleteSession(other.id), /正在更新/);
+    await resetting;
+    await mgr.deleteSession(other.id);
+
+    // The laptop replaced the PR's commits and GitHub merged that. This clone's tracking ref still has the old ones,
+    // which proves nothing: the branch stays, through archiving and through Delete.
+    const replaced = await mgr.createSession({ cwd: repo });
+    commit(replaced.worktreePath!, "a.txt", "only on the mini\n");
+    await mgr.shipSession(replaced.id, { message: "a" });
+    const laptop = path.join(root, "laptop9");
+    git(root, "clone", "-q", "https://github.com/owner/repo.git", laptop);
+    git(laptop, "checkout", "-q", "-b", replaced.branch!);
+    commit(laptop, "b.txt", "the replacement\n");
+    git(laptop, "push", "-q", "--force", "origin", replaced.branch!);
+    const merged = git(laptop, "rev-parse", "HEAD");
+    git(repo, "fetch", "-q", "--refmap=", "origin", `refs/heads/${replaced.branch}:refs/test/merged`); // its object only
+    flag("pr-state", "MERGED");
+    flag("pr-head", merged);
+    await mgr.checkPullRequests();
+    assert.equal((await mgr.getSessionSummary(replaced.id)).status, "archived");
+    await mgr.deleteSession(replaced.id);
+    assert.equal(git(repo, "log", "-1", "--format=%s", replaced.branch!), "edit a.txt");
+    flag("pr-head");
+
+    // Deleted while gh answers: the answer isn't applied, and the session isn't reopened.
+    const gone = await mgr.createSession({ cwd: repo });
+    commit(gone.worktreePath!, "g.txt", "g\n");
+    await mgr.shipSession(gone.id, { message: "g" });
+    await held(() => mgr.deleteSession(gone.id));
+    await assert.rejects(mgr.getSessionSummary(gone.id), /not found/);
+    assert.equal(fs.existsSync(path.join(dataDir, "sessions", gone.id)), false);
+
+    // Shipped again while gh answers about the PR as it was: that answer is about a PR record that's been replaced.
+    const again = await mgr.createSession({ cwd: repo });
+    commit(again.worktreePath!, "h.txt", "h\n");
+    await mgr.shipSession(again.id, { message: "h" });
+    commit(again.worktreePath!, "i.txt", "i\n");
+    flag("pr-state", "CLOSED");
+    await held(() => mgr.shipSession(again.id, { message: "i" }));
+    const summary = await mgr.getSessionSummary(again.id);
+    assert.deepEqual([summary.status, summary.prState, fs.existsSync(again.worktreePath!)], ["shipped", "open", true]);
+  } finally {
+    for (const name of ["pr-state", "pr-head", "view-wait", "release"]) flag(name);
     await mgr.close();
   }
 });
