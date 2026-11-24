@@ -233,11 +233,22 @@ async function backedUp(gitDir: string, tip: string, safe: (string | undefined)[
 
 const TRASH_DAYS = 7;
 
+/** Housekeeping that mustn't undo what's done: a failure is logged, not thrown. */
+function tidy(what: string, run: () => void): void {
+  try {
+    run();
+  } catch (err) {
+    console.warn(`[mypi-server] Couldn't ${what}: ${firstLine(err)}`);
+  }
+}
+
 /** Old trash, by the time in its name: what an unconfirmed removal moved aside a week ago. */
 function emptyTrash(trash: string): void {
   for (const name of fs.existsSync(trash) ? fs.readdirSync(trash) : []) {
     const at = Number(/-(\d+)$/.exec(name)?.[1]);
-    if (at && Date.now() - at > TRASH_DAYS * 86_400_000) fs.rmSync(path.join(trash, name), { recursive: true, force: true });
+    if (at && Date.now() - at > TRASH_DAYS * 86_400_000) {
+      tidy(`empty ${path.join(trash, name)}`, () => fs.rmSync(path.join(trash, name), { recursive: true, force: true }));
+    }
   }
 }
 
@@ -279,6 +290,7 @@ export async function removeSessionWorktree(
 
   let meta: string | undefined;
   let retired: string | undefined;
+  let moved: string | undefined;
   if (registered) {
     const common = await git(gitDir, ["rev-parse", "--path-format=absolute", "--git-common-dir"]);
     meta = metadataDir(common, registered.dir);
@@ -301,16 +313,19 @@ export async function removeSessionWorktree(
     if (fs.existsSync(checkout) && options.force) {
       fs.rmSync(checkout, { recursive: true, force: true });
     } else if (fs.existsSync(checkout)) {
-      const trashDir = path.join(path.dirname(checkout), ".trash");
-      fs.mkdirSync(trashDir, { recursive: true });
-      const moved = path.join(trashDir, `${path.basename(checkout)}-${Date.now()}`);
+      fs.mkdirSync(path.join(path.dirname(checkout), ".trash"), { recursive: true });
+      moved = path.join(path.dirname(checkout), ".trash", `${path.basename(checkout)}-${Date.now()}`);
       fs.renameSync(checkout, moved);
-      for (const p of regenerable) fs.rmSync(path.join(moved, p), { recursive: true, force: true });
-      emptyTrash(trashDir);
     }
   } catch (err) {
-    if (retired && meta) fs.renameSync(retired, meta); // the checkout is still there: so is its metadata
+    // Not moved (or a forced delete stopped partway): the checkout is still there, so its metadata goes back.
+    if (retired && meta) fs.renameSync(retired, meta);
     throw err;
+  }
+  // From here the checkout is in trash whatever happens: housekeeping can fail, but doesn't undo that.
+  if (moved) {
+    for (const p of regenerable) tidy(`delete ${p} from ${moved}`, () => fs.rmSync(path.join(moved!, p), { recursive: true, force: true }));
+    emptyTrash(path.dirname(moved));
   }
   // The metadata stays (in mypi-retired/ in the git dir) for the same week as the trash: its index has what was
   // staged, its logs the worktree's HEAD history.
@@ -323,7 +338,8 @@ export async function removeSessionWorktree(
   if (was && was !== tip) {
     // It moved between the check and the delete: put it back, under another name if that's been taken since.
     await git(gitDir, ["branch", worktree.branch, was])
-      .catch(() => git(gitDir, ["branch", `${worktree.branch}-moved-${was.slice(0, 8)}`, was]));
+      .catch(() => git(gitDir, ["branch", `${worktree.branch}-moved-${was.slice(0, 8)}`, was]))
+      .catch((err) => console.warn(`[mypi-server] ${worktree.branch} moved to ${was} while being deleted, and couldn't be put back: ${firstLine(err)}`));
   }
   return { removed: true, branchDeleted: was === tip, work };
 }

@@ -383,6 +383,19 @@ it("loses nothing written after the count: late files go to trash, a late commit
   const wt3 = (await createSessionWorktree(repo, root, "l3"))!;
   assert.equal((await removeSessionWorktree(wt3)).branchDeleted, true, "nothing but the base on it");
   assert.equal(fs.existsSync(old), false);
+  // Old trash that can't be emptied (its contents can't be reached): the removal still finishes, and the checkout's
+  // metadata isn't put back over a folder that's already in trash.
+  const stuck = path.join(root, ".trash", `stuck-${Date.now() - 8 * 86_400_000}`);
+  write(path.join(stuck, "inner", "f.txt"), "f\n");
+  fs.chmodSync(stuck, 0o400);
+  const wt13 = (await createSessionWorktree(repo, root, "l13"))!;
+  try {
+    assert.equal((await removeSessionWorktree(wt13)).removed, true);
+    assert.equal(git(repo, "worktree", "list", "--porcelain").includes(wt13.path), false, "not registered again");
+    assert.ok(fs.readdirSync(path.join(root, ".trash")).some((name) => name.startsWith(`${path.basename(wt13.path)}-`)));
+  } finally {
+    fs.chmodSync(stuck, 0o700);
+  }
 
   // A catalog entry from before gitDir and baseCommit were recorded still works, from the checkout.
   const wt4 = (await createSessionWorktree(repo, root, "l4"))!;
