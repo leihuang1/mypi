@@ -1074,7 +1074,7 @@ export class HarnessManager {
         return { ready: false, reason: "这个会话直接在原目录里工作，没有自己的分支可以发布", uncommitted: 0, unpushed: 0, suggestedMessage: message };
       }
       const inspection = await managed.harness.inspect(BACKGROUND_CONTEXT);
-      const state = await shipState(meta.worktree);
+      const state = await shipState(meta.worktree, meta.pr?.state === "open" ? meta.pr.url : undefined);
       // Pushed, but the PR wasn't opened or recorded (gh failed, the daemon stopped): Ship can still finish.
       const unfinished = meta.pr?.state !== "open" && state.ahead > 0;
       const nothing = state.uncommitted + state.unpushed === 0 && !unfinished;

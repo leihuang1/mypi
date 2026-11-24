@@ -145,6 +145,14 @@ it("ships the session branch as a draft PR, updates it, and never force-pushes o
     assert.equal(ghCalls().filter((call) => call.startsWith("pr create")).length, 1);
     assert.equal(git(remote, "rev-parse", `refs/heads/${branch}`), git(wt, "rev-parse", "HEAD"));
 
+    // origin now points at a fork: the update would go there while the PR stays on owner/repo.
+    git(repo, "remote", "set-url", "origin", "https://github.com/owner/fork.git");
+    assert.match((await mgr.shipPreview(session.id)).reason!, /origin 现在指向 owner\/fork，打开的 PR 在 owner\/repo 上/);
+    await assert.rejects(mgr.shipSession(session.id, {}), /打开的 PR 在 owner\/repo 上/);
+    git(repo, "remote", "set-url", "origin", "https://github.com/OWNER/repo.git");
+    assert.equal((await mgr.shipPreview(session.id)).reason, "已发布，之后没有新的改动", "GitHub names aren't case-sensitive");
+    git(repo, "remote", "set-url", "origin", "https://github.com/owner/repo.git");
+
     // A catalog from before Ship recorded the input it shipped can't tell whether later input went out: done, not shipped.
     await mgr.close();
     const catalogPath = path.join(root, "data", "catalog.json");

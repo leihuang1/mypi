@@ -102,7 +102,8 @@ async function destination(cwd: string): Promise<{ repo?: string; problem?: stri
 }
 
 /** Whether the worktree can be shipped, and what it holds. */
-export async function shipState(worktree: SessionWorktree): Promise<ShipState> {
+/** `openPr`: the URL of the session's open PR, which Ship would update: it must be in the repo the push reaches. */
+export async function shipState(worktree: SessionWorktree, openPr?: string): Promise<ShipState> {
   const none = { uncommitted: 0, unpushed: 0, ahead: 0 };
   if (!fs.existsSync(worktree.path)) return { problem: "这个会话的工作区已经不在了", ...none };
   const cwd = worktree.path;
@@ -117,6 +118,11 @@ export async function shipState(worktree: SessionWorktree): Promise<ShipState> {
   if (!worktree.baseRef.startsWith("origin/")) return refuse("这个仓库没有 origin 远程，无法推送");
   const { repo, problem } = await destination(cwd);
   if (problem) return refuse(problem);
+  // origin was pointed elsewhere (a fork) since the PR was opened: the push would land in one repo, the PR in another.
+  const prRepo = openPr && /^https:\/\/github\.com\/([\w.-]+\/[\w.-]+)\/pull\/\d+$/.exec(openPr)?.[1];
+  if (openPr && prRepo?.toLowerCase() !== repo!.toLowerCase()) {
+    return refuse(`origin 现在指向 ${repo}，打开的 PR 在 ${prRepo ?? openPr} 上：Ship 不会把改动推到另一个仓库`);
+  }
   const prBase = worktree.baseRef.slice("origin/".length);
   const head = await run("git", cwd, ["symbolic-ref", "--quiet", "--short", "HEAD"]).catch(() => "");
   // Ship's whole push rule: only the session's own mypi/ branch, never the default branch.
@@ -153,7 +159,7 @@ export async function shipWorktree(
   worktree: SessionWorktree,
   options: { message: string; body: string; existing?: PullRequestInfo },
 ): Promise<{ pr: PullRequestInfo; committed: boolean; pushed: boolean; head: string }> {
-  const state = await shipState(worktree);
+  const state = await shipState(worktree, options.existing?.url);
   if (state.problem) throw new ConflictError(state.problem);
   const { repo, base } = state as Required<ShipState>;
   const branch = worktree.branch;
