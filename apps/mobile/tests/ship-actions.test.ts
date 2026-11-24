@@ -20,7 +20,7 @@ function screen(client: Record<string, unknown>, session: Record<string, unknown
     topSheet: null, controlBusy: false, shipPreview: null, shipMessage: "", sending: false, failedDraft: null, error: null,
     mountedRef: { current: true }, currentSessionIdRef: { current: "s1" }, isNearBottomRef: { current: false },
     controlBusyRef: { current: false }, previewGenRef: { current: 0 }, sessionRef: { current: session },
-    summaryGenRef: { current: 0 }, lastSummaryAtRef: { current: 0 }, answeredRef: { current: new Map() }, viewKey: "v",
+    summaryGenRef: { current: 0 }, lastSummaryAtRef: { current: 0 }, answeredRef: { current: new Map() }, withdrawnRef: { current: new Set() }, viewKey: "v",
     // The parent: it rerenders the screen later, so it doesn't touch the screen's refs.
     onSessionUpdated: (summary: any) => { updates.push(summary); state.session = summary; },
     timers: [] as (() => void)[],
@@ -102,7 +102,7 @@ it("archives at once when there's no work, and asks first when there is", async 
   await state.handleArchive();
   assert.deepEqual(plain(calls), [{ force: false }]);
   assert.equal(alerts.length, 1);
-  assert.match(alerts[0].message, /1 个未提交的改动会被丢弃\n1 个被忽略的文件（如 .env）会被删除\n2 个未推送的提交会留在本地分支 mypi\/s1 上（游离 HEAD 上的提交在 mypi\/s1-detached，这个名字已被占用时加上提交号）/);
+  assert.match(alerts[0].message, /1 个未提交的改动会被丢弃\n1 个被忽略的文件（如 .env）会被删除\n2 个未推送的提交会留在本地分支 mypi\/s1 上（游离 HEAD 上的提交留在已包含它们的分支上，否则在 mypi\/s1-detached，名字被占用时加上提交号）/);
   assert.equal(state.topSheet, "ship", "nothing happened yet");
   alerts[0].buttons.find((b) => b.text === "归档")!.onPress!();
   await tick();
@@ -208,8 +208,34 @@ it("keeps an answered question gone and a newer one shown, in whatever order sum
   two.state.applySummary({ id: "s1", updatedAt: 2, status: "needs_you", question: { text: "Deploy now?", id: 9 } });
   await two.state.handleAnswer("yes");
   two.state.applySummary({ id: "s1", updatedAt: 3, status: "done" });
-  assert.equal(two.state.applySummary({ ...asked, updatedAt: 3 }), undefined);
-  assert.equal(two.updates.at(-1).status, "done");
+  // Its status and question are out of date; the rest is applied.
+  const kept = two.state.applySummary({ ...asked, updatedAt: 3, name: "Renamed" });
+  assert.deepEqual([kept.status, kept.question, kept.name], ["done", undefined, "Renamed"]);
+
+  // Renamed while the answer is still queued: the daemon's reply still has the question, and the new name shows.
+  const renamed = screen({ sendMessage: async () => ({ submissionId: 43, status: "queued" }) }, asked);
+  await renamed.state.handleAnswer("tabs");
+  renamed.state.applySummary({ ...asked, updatedAt: 2, name: "Saved title" });
+  assert.deepEqual([renamed.updates.at(-1).name, renamed.updates.at(-1).status, renamed.updates.at(-1).question],
+    ["Saved title", "running", undefined]);
+
+  // Withdrawn before the send's response came back (the queue row arrived first): the late response doesn't mark
+  // the question answered.
+  let respond!: (value: unknown) => void;
+  const early = screen({
+    sendMessage: () => new Promise((resolve) => { respond = resolve; }),
+    abortSubmission: async () => ({ submissionId: 44, status: "aborted" }),
+  }, asked);
+  const answering44 = early.state.handleAnswer("tabs");
+  while (!respond) await tick();
+  await early.state.handleAbortSubmission(44);
+  respond({ submissionId: 44, status: "queued" });
+  await answering44;
+  assert.equal(early.state.sessionRef.current.question?.id, 5);
+  // A Retry of a withdrawn answer: the daemon says it went unanswered, so the question still stands.
+  const retried = screen({ sendMessage: async () => ({ submissionId: 45, status: "unanswered" }) }, asked);
+  await retried.state.handleAnswer("tabs");
+  assert.equal(retried.state.sessionRef.current.question?.id, 5);
 
   // A read from before the daemon took the answer, stamped as late as the answer, arriving after the run's own
   // summary: it still shows the answered question, so its chips stay gone.
@@ -222,7 +248,7 @@ it("keeps an answered question gone and a newer one shown, in whatever order sum
   const { state, updates } = screen({}, asked);
   await state.handleAnswer("tabs");
   assert.equal(updates.at(-1).question, undefined);
-  assert.equal(state.applySummary({ ...asked }), undefined, "out of date: not applied");
+  assert.deepEqual([state.applySummary({ ...asked })?.status, updates.at(-1).status], ["running", "running"]);
   assert.equal(updates.at(-1).question, undefined);
 
   // Two summaries before a rerender: the older second one is dropped.

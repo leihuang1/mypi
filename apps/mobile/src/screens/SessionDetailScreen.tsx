@@ -268,9 +268,11 @@ export function SessionDetailScreen({
   const summaryGenRef = useRef(0);
   const lastSummaryAtRef = useRef(0);
   // Every question the daemon took an answer to here, by id, with the answer's submission: a summary still showing
-  // one (a snapshot or read from before the daemon took the answer) is out of date. Withdrawing an answer before it
-  // ran makes its question unanswered again.
+  // one (a snapshot or read from before the daemon took the answer, or the answer is still queued) has an out-of-date
+  // status and question. Withdrawing an answer before it ran makes its question unanswered again; withdrawals are
+  // remembered in case the answer's send response comes back after it.
   const answeredRef = useRef(new Map<number, number | undefined>());
+  const withdrawnRef = useRef(new Set<number>());
 
   // Quick @-mention inline directory browser state
   const [quickBrowsePath, setQuickBrowsePath] = useState<string>(session.cwd);
@@ -302,17 +304,20 @@ export function SessionDetailScreen({
   };
 
   /**
-   * Apply a summary from the daemon, unless it's out of date: older than one already applied (a slow read, a late
-   * snapshot), or still showing a question answered here (whatever its timestamp). Returns it if applied.
+   * Apply a summary from the daemon, unless it's older than one already applied (a slow read, a late snapshot).
+   * One still showing a question answered here (whatever its timestamp) has an out-of-date status and question: the
+   * ones already shown stay, and the rest (a new title) is applied. Returns what was applied.
    */
   const applySummary = (incoming: SessionSummary): SessionSummary | undefined => {
     if (incoming.id !== sessionRef.current.id || incoming.updatedAt < sessionRef.current.updatedAt) return undefined;
-    if (incoming.question?.id !== undefined && answeredRef.current.has(incoming.question.id)) return undefined;
+    const stale = incoming.question?.id !== undefined && answeredRef.current.has(incoming.question.id);
+    const { status, question } = sessionRef.current;
+    const updated = stale ? { ...incoming, status, question } : incoming;
     // Now, not at the next render: a second summary in the same batch is compared with this one.
-    sessionRef.current = incoming;
+    sessionRef.current = updated;
     lastSummaryAtRef.current = Date.now();
-    onSessionUpdated?.(incoming);
-    return incoming;
+    onSessionUpdated?.(updated);
+    return updated;
   };
   /** A change made here (Ship, Archive, a message): reads started before it are out of date. */
   const appliedLocally = (updated: SessionSummary) => {
@@ -494,7 +499,9 @@ export function SessionDetailScreen({
       if (getSessionView(viewKey).failedDraft !== pending) return;
       saveSessionView(viewKey, { failedDraft: null });
       // Answered: that question goes wherever it still shows, and the summary is read again. A newer question stays.
-      if (answers !== undefined && mountedRef.current && currentSessionIdRef.current === targetSessionId) {
+      // Not if the answer was withdrawn already (before this response, or before this retry).
+      const withdrawn = sent?.status === "unanswered" || (sent !== undefined && withdrawnRef.current.has(sent.submissionId));
+      if (answers !== undefined && !withdrawn && mountedRef.current && currentSessionIdRef.current === targetSessionId) {
         answeredRef.current.set(answers, sent?.submissionId);
         if (sessionRef.current.question?.id === answers) {
           applySummary({ ...sessionRef.current, status: "running", question: undefined });
@@ -572,10 +579,12 @@ export function SessionDetailScreen({
     try {
       const result = await client.abortSubmission(targetSessionId, submissionId);
       // An answer withdrawn before it ran: its question is unanswered again.
-      const withdrawn = result?.status === "aborted"
-        ? [...answeredRef.current].filter(([, submission]) => submission === submissionId) : [];
-      for (const [question] of withdrawn) answeredRef.current.delete(question);
-      if (withdrawn.length && mountedRef.current && currentSessionIdRef.current === targetSessionId) refreshSummary();
+      if (result?.status === "aborted") {
+        withdrawnRef.current.add(submissionId);
+        const withdrawn = [...answeredRef.current].filter(([, submission]) => submission === submissionId);
+        for (const [question] of withdrawn) answeredRef.current.delete(question);
+        if (withdrawn.length && mountedRef.current && currentSessionIdRef.current === targetSessionId) refreshSummary();
+      }
     } catch (err) {
       if (mountedRef.current && currentSessionIdRef.current === targetSessionId) {
         setConnError(err instanceof Error ? err.message : String(err));
@@ -721,7 +730,7 @@ export function SessionDetailScreen({
       const what = [
         result.uncommitted > 0 ? `${result.uncommitted} 个未提交的改动会被丢弃` : "",
         result.ignored > 0 ? `${result.ignored} 个被忽略的文件（如 .env）会被删除` : "",
-        result.unpushed > 0 ? `${result.unpushed} 个未推送的提交会留在本地分支 ${session.branch} 上（游离 HEAD 上的提交在 ${session.branch}-detached，这个名字已被占用时加上提交号）` : "",
+        result.unpushed > 0 ? `${result.unpushed} 个未推送的提交会留在本地分支 ${session.branch} 上（游离 HEAD 上的提交留在已包含它们的分支上，否则在 ${session.branch}-detached，名字被占用时加上提交号）` : "",
       ].filter(Boolean).join("\n");
       Alert.alert("归档这个会话？", `${what}\n归档后会话只能查看。`, [
         { text: "取消", style: "cancel" },
