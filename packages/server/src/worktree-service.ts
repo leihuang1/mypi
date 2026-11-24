@@ -409,7 +409,8 @@ export async function removeSessionWorktree(
   if (now) {
     // Moved, so kept. Or deleted and then made again, by a commit in a checkout of it that was still under way: that
     // commit had no branch to build on. Rebasing puts it on its history (not done here: it's the owner's commit).
-    if (deleted && !(await git(gitDir, ["merge-base", "--is-ancestor", tip, now]).then(() => true, () => false))) {
+    const parentless = (await git(gitDir, ["rev-list", "--parents", "-n", "1", now]).catch(() => "")).split(" ").length === 1;
+    if (deleted && now !== tip && parentless) {
       console.warn(`[mypi-server] ${worktree.branch} was made again at ${now} while being deleted, by a commit that ` +
         `doesn't build on ${tip}; if it should, \`git rebase --root --onto ${tip} ${worktree.branch}\``);
     }

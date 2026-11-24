@@ -534,6 +534,23 @@ it("says how to put back a commit made on the branch while it was being deleted,
   }
   assert.equal(git(repo, "rev-parse", wt2.branch), git(repo, "rev-parse", `${wt2.baseCommit}~1`));
   assert.deepEqual(warned.filter((w) => w.includes("rebase")), []);
+
+  // Deleted, then made again by an amended commit (it has a parent, just not the old tip): its history is fine.
+  const wt3 = (await createSessionWorktree(repo, path.join(dir, "worktrees"), "c3"))!;
+  const tip3 = git(repo, "rev-parse", wt3.branch);
+  write(path.join(bin, "git"), `#!/bin/sh\n/usr/bin/git "$@"\nrc=$?\ncase "$*" in *"--no-deref -d"*) cd "${repo}" && ` +
+    `n=$(/usr/bin/git commit-tree -p ${tip3}~1 -m amended "${tip3}^{tree}") && /usr/bin/git update-ref refs/heads/${wt3.branch} $n;; esac\nexit $rc\n`);
+  warned.length = 0;
+  process.env.PATH = `${bin}:${savedPath}`;
+  console.warn = (...args: unknown[]) => { warned.push(args.map(String).join(" ")); };
+  try {
+    assert.equal((await removeSessionWorktree(wt3)).branchDeleted, false);
+  } finally {
+    process.env.PATH = savedPath;
+    console.warn = warn;
+  }
+  assert.equal(git(repo, "log", "-1", "--format=%s", wt3.branch), "amended");
+  assert.deepEqual(warned.filter((w) => w.includes("rebase")), []);
 });
 
 it("keeps an old detached commit even if git's prune and gc run just as the metadata is renamed", async () => {
