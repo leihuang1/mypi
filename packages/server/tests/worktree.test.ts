@@ -439,6 +439,10 @@ it("loses nothing written after the count: late files go to trash, a late commit
   // every copy at once).
   fs.writeFileSync(path.join(repaired.copy, ".git"), `gitdir: ${path.relative(repaired.copy, repaired.meta)}\n`);
   assert.equal(git(repaired.copy, "rev-parse", "--is-inside-work-tree"), "true");
+  // Repaired, and its `.git` can't be read when expiry looks: it can't tell, so it stays.
+  const unreadable = await removedAndAged("lf");
+  fs.writeFileSync(path.join(unreadable.copy, ".git"), `gitdir: ${unreadable.meta}\n`);
+  fs.chmodSync(path.join(unreadable.copy, ".git"), 0o000);
   const unlocked = await removedAndAged("lc");
   git(repo, "worktree", "unlock", unlocked.copy);
   // Moved out of trash, still locked (what `git worktree move -f -f` does: the folder, and its path in the metadata).
@@ -460,10 +464,12 @@ it("loses nothing written after the count: late files go to trash, a late commit
     assert.equal((await removeSessionWorktree(wt3)).branchDeleted, true, "nothing but the base on it");
   } finally {
     fs.chmodSync(path.join(stuck.copy, "inner"), 0o700);
+    fs.chmodSync(path.join(unreadable.copy, ".git"), 0o644);
   }
   assert.deepEqual([fs.existsSync(expiring.meta), fs.existsSync(expiring.copy)], [false, false], "expired");
   assert.deepEqual([repaired, unlocked].flatMap((k) => [fs.existsSync(k.meta), fs.existsSync(k.copy)]), [true, true, true, true]);
   assert.deepEqual([fs.existsSync(movedOut.meta), fs.existsSync(outside)], [true, true]);
+  assert.deepEqual([fs.existsSync(unreadable.meta), fs.existsSync(unreadable.copy)], [true, true], "unreadable .git");
   assert.equal(git(repaired.copy, "rev-parse", "--is-inside-work-tree"), "true", "the repaired copy still works");
   assert.ok(fs.existsSync(stuck.meta), "kept while its copy is there");
   assert.equal(fs.readFileSync(path.join(root, ".mypi-trash", `owner-backup-${weekAgo}`, "only.txt"), "utf8"), "mine\n");
@@ -502,22 +508,35 @@ it("puts git's metadata back as it was, unlocked, after a failure before the mov
 
 it("puts git's metadata back if its lock can't be written right after the rename", async () => {
   const { dir, repo } = fixture("lock-fails");
-  const wt = (await createSessionWorktree(repo, path.join(dir, "worktrees"), "k1"))!;
-  const writeFile = fs.writeFileSync;
-  fs.writeFileSync = ((file: fs.PathOrFileDescriptor, ...rest: unknown[]) => {
-    if (String(file).includes("-mypi-retired-") && String(file).endsWith("/locked")) {
-      throw Object.assign(new Error("EACCES: permission denied"), { code: "EACCES" });
+  // It can't be made (EACCES), or it's made and writing it fails (ENOSPC): either way nothing of it is left.
+  for (const [n, failing] of [[1, "openSync"], [2, "writeSync"]] as const) {
+    const wt = (await createSessionWorktree(repo, path.join(dir, "worktrees"), `k${n}`))!;
+    const real = fs[failing] as (...args: unknown[]) => unknown;
+    let lockFd: number | undefined;
+    const openSync = fs.openSync;
+    fs.openSync = ((file: fs.PathLike, ...rest: unknown[]) => {
+      const fd = (openSync as (...args: unknown[]) => number)(file, ...rest);
+      if (String(file).includes("-mypi-retired-") && String(file).endsWith("/locked")) lockFd = fd;
+      return fd;
+    }) as typeof fs.openSync;
+    (fs as unknown as Record<string, unknown>)[failing] = (...args: unknown[]) => {
+      const lock = failing === "openSync" ? String(args[0]).includes("-mypi-retired-") && String(args[0]).endsWith("/locked")
+        : args[0] === lockFd;
+      if (lock) throw Object.assign(new Error(`${failing === "openSync" ? "EACCES" : "ENOSPC"}: failed`), { code: "E" });
+      return failing === "openSync" ? (openSync as (...a: unknown[]) => number)(...args) : real(...args);
+    };
+    try {
+      await assert.rejects(removeSessionWorktree(wt), /EACCES|ENOSPC/);
+    } finally {
+      fs.openSync = openSync;
+      (fs as unknown as Record<string, unknown>)[failing] = real;
     }
-    return (writeFile as (...args: unknown[]) => void)(file, ...rest);
-  }) as typeof fs.writeFileSync;
-  try {
-    await assert.rejects(removeSessionWorktree(wt), /EACCES/);
-  } finally {
-    fs.writeFileSync = writeFile;
+    assert.equal(git(wt.path, "rev-parse", "--abbrev-ref", "HEAD"), wt.branch, "the checkout works as before");
+    const entry = git(repo, "worktree", "list", "--porcelain").split("\n\n").find((b) => b.split("\n")[0].endsWith(`/${path.basename(wt.path)}`));
+    assert.ok(entry && !entry.includes("locked"), `${failing}: ${entry}`);
+    // And a later try, once it can, removes it.
+    assert.equal((await removeSessionWorktree(wt)).removed, true, failing);
   }
-  assert.equal(git(wt.path, "rev-parse", "--abbrev-ref", "HEAD"), wt.branch, "the checkout works as before");
-  // And a later try, once it can, removes it.
-  assert.equal((await removeSessionWorktree(wt)).removed, true);
 });
 
 it("never deletes through a symbolic ref: a session branch that's an alias of main", async () => {

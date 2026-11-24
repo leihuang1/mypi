@@ -270,9 +270,21 @@ function expireRetired(worktrees: string): void {
     if (!at || Date.now() - at <= TRASH_DAYS * 86_400_000 || !fs.existsSync(path.join(meta, RETIRED))) continue;
     const copy = path.dirname(read(path.join(meta, "gitdir")) ?? "");
     // Repaired: its copy's `.git` names this folder again (by path or, with worktree.useRelativePaths, relatively).
+    // A `.git` that can't be read can't show it wasn't, so it stays; only a copy that's gone needs none.
+    let link: string | undefined = "";
+    if (copy !== meta) {
+      link = read(path.join(copy, ".git"));
+      if (link === undefined) {
+        try {
+          fs.lstatSync(copy);
+        } catch (err) {
+          if ((err as NodeJS.ErrnoException).code === "ENOENT") link = "";
+        }
+      }
+    }
     const untouched = read(path.join(meta, "locked"))?.startsWith(RETIRED_LOCK) && path.isAbsolute(copy) &&
-      (copy === meta || (path.basename(path.dirname(copy)) === TRASH && /-\d{13}$/.test(copy) &&
-        !read(path.join(copy, ".git"))?.includes(name)));
+      link !== undefined && !link.includes(name) &&
+      (copy === meta || (path.basename(path.dirname(copy)) === TRASH && /-\d{13}$/.test(copy)));
     if (!untouched) continue;
     // The copy first: its metadata keeps what it reaches from gc until it's gone.
     tidy(`empty ${copy}`, () => {
@@ -364,9 +376,21 @@ export async function removeSessionWorktree(
       // Checked again where nothing can change it any more: a submodule added or a lock taken just before the rename.
       late = refusal(retired);
       if (late) throw new Error(late);
-      fs.writeFileSync(path.join(retired, "locked"),
-        `${RETIRED_LOCK}; kept until ${new Date(Date.now() + TRASH_DAYS * 86_400_000).toISOString()}\n`);
+      // Made here, so ours from the moment it exists (a write that fails after that leaves nothing behind); one the
+      // owner took in the moment since the check is theirs.
+      let fd: number;
+      try {
+        fd = fs.openSync(path.join(retired, "locked"), "wx");
+      } catch (err) {
+        if ((err as NodeJS.ErrnoException).code === "EEXIST") late = refusal(retired);
+        throw err;
+      }
       locked = true;
+      try {
+        fs.writeSync(fd, `${RETIRED_LOCK}; kept until ${new Date(Date.now() + TRASH_DAYS * 86_400_000).toISOString()}\n`);
+      } finally {
+        fs.closeSync(fd);
+      }
     }
     // HEAD as git resolves it from the renamed metadata: any object format, any ref storage (reftable's HEAD file
     // isn't the commit). Not resolving is fine only for a branch with no commits yet.
