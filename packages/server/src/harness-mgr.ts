@@ -179,6 +179,14 @@ function firstLine(err: unknown): string {
  * A commit known to be on GitHub, for when the PR's branch is gone: only the head GitHub says it merged (squash or
  * rebase merges leave its commits on no branch). Not Ship's head: commits may have been force-pushed away since.
  */
+/** Why a removal kept the worktree, for the log. */
+function keptBecause(result: Awaited<ReturnType<typeof removeSessionWorktree>>): string {
+  if (result.blocked) return result.blocked;
+  if (result.unregistered) return "git doesn't know the folder as this session's worktree";
+  const { uncommitted, ignored, unpushed } = result.work;
+  return `${uncommitted} uncommitted path(s), ${ignored} ignored file(s), ${unpushed} unpushed commit(s)`;
+}
+
 function shippedHead(meta: CatalogEntry): string | undefined {
   return meta.pr?.state === "merged" ? meta.pr.mergedHead : undefined;
 }
@@ -248,6 +256,8 @@ export class HarnessManager {
     return running(await managed.harness.inspect(BACKGROUND_CONTEXT));
   }
   private prTimer: ReturnType<typeof setInterval> | undefined;
+  /** Why each session's worktree was last kept by the PR cleanup, so a kept one is logged once, not every round. */
+  private readonly keptWorktrees = new Map<string, string>();
   private checkingPullRequests = false;
   private closing = false;
   private closePromise: Promise<void> | null = null;
@@ -983,10 +993,9 @@ export class HarnessManager {
 
     if (meta.worktree) {
       try {
-        const { removed, work } = await removeSessionWorktree(meta.worktree, { pushed: shippedHead(meta) });
-        if (!removed) {
-          console.warn(`[mypi-server] Kept ${meta.worktree.path} and ${meta.worktree.branch} of deleted session ${meta.id}: ` +
-            `${work.uncommitted} uncommitted path(s), ${work.unpushed} unpushed commit(s)`);
+        const result = await removeSessionWorktree(meta.worktree, { pushed: shippedHead(meta) });
+        if (!result.removed) {
+          console.warn(`[mypi-server] Kept ${meta.worktree.path} and ${meta.worktree.branch} of deleted session ${meta.id}: ${keptBecause(result)}`);
         }
       } catch (err) {
         console.error(`[mypi-server] Could not remove the worktree of deleted session ${meta.id}:`, err);
@@ -1149,8 +1158,11 @@ export class HarnessManager {
           work = found;
           // Locked, or holding submodule repositories: no confirmation makes removing it safe.
           if (result.blocked) throw new ConflictError(result.blocked);
-          if (!result.removed && !force) return { archived: false, ...work, session: await this.buildSessionSummary(meta) };
-          if (!result.removed) console.warn(`[mypi-server] Archived ${meta.id} but kept ${meta.worktree.path}: git doesn't know it as this worktree`);
+          // A folder git doesn't know as this worktree is left alone: nothing to confirm.
+          if (!result.removed && !result.unregistered && !force) {
+            return { archived: false, ...work, session: await this.buildSessionSummary(meta) };
+          }
+          if (!result.removed) console.warn(`[mypi-server] Archived ${meta.id} but kept ${meta.worktree.path}: ${keptBecause(result)}`);
         }
         meta.archivedAt = Date.now();
         meta.updatedAt = meta.archivedAt;
@@ -1221,10 +1233,15 @@ export class HarnessManager {
    */
   private async cleanUp(meta: CatalogEntry): Promise<void> {
     if (await this.isRunning(meta)) return;
-    const result = meta.worktree
-      ? await removeSessionWorktree(meta.worktree, { pushed: shippedHead(meta) })
-      : { removed: true };
-    if (!result.removed) return;
+    const result = meta.worktree ? await removeSessionWorktree(meta.worktree, { pushed: shippedHead(meta) }) : undefined;
+    if (result && !result.removed && !result.unregistered) {
+      // Tried again every round; said once, and again only if the reason changes.
+      const why = keptBecause(result);
+      if (this.keptWorktrees.get(meta.id) !== why) console.warn(`[mypi-server] Kept the worktree of ${meta.id} after its PR closed: ${why}`);
+      this.keptWorktrees.set(meta.id, why);
+      return;
+    }
+    this.keptWorktrees.delete(meta.id);
     meta.archivedAt = Date.now();
     meta.updatedAt = meta.archivedAt;
     this.saveCatalog();

@@ -232,6 +232,8 @@ async function backedUp(gitDir: string, tip: string, safe: (string | undefined)[
 }
 
 const TRASH_DAYS = 7;
+/** Where an unconfirmed removal moves a checkout: beside it, in a folder of mypi's own. */
+const TRASH = ".mypi-trash";
 
 /** Housekeeping that mustn't undo what's done: a failure is logged, not thrown. */
 function tidy(what: string, run: () => void): void {
@@ -242,12 +244,25 @@ function tidy(what: string, run: () => void): void {
   }
 }
 
-/** Old trash, by the time in its name: what an unconfirmed removal moved aside a week ago. */
-function emptyTrash(trash: string): void {
-  for (const name of fs.existsSync(trash) ? fs.readdirSync(trash) : []) {
-    const at = Number(/-(\d+)$/.exec(name)?.[1]);
+/** What removal put in `dir` over a week ago, by the time it added to the name (13 digits: milliseconds). */
+function emptyTrash(dir: string): void {
+  let names: string[] = [];
+  tidy(`list ${dir}`, () => { names = fs.existsSync(dir) ? fs.readdirSync(dir) : []; });
+  for (const name of names) {
+    const at = Number(/^.+-(\d{13})$/.exec(name)?.[1]);
     if (at && Date.now() - at > TRASH_DAYS * 86_400_000) {
-      tidy(`empty ${path.join(trash, name)}`, () => fs.rmSync(path.join(trash, name), { recursive: true, force: true }));
+      tidy(`empty ${path.join(dir, name)}`, () => fs.rmSync(path.join(dir, name), { recursive: true, force: true }));
+    }
+  }
+}
+
+/** The refs keeping what was staged in removed worktrees (see `removeSessionWorktree`), by the same week. */
+async function expireStaged(gitDir: string): Promise<void> {
+  const refs = await git(gitDir, ["for-each-ref", "--format=%(refname)", "refs/mypi-retired/"]).catch(() => "");
+  for (const ref of refs.split("\n")) {
+    const at = Number(/-(\d{13})$/.exec(ref)?.[1]);
+    if (at && Date.now() - at > TRASH_DAYS * 86_400_000) {
+      await git(gitDir, ["update-ref", "-d", ref]).catch((err) => console.warn(`[mypi-server] Couldn't delete ${ref}: ${firstLine(err)}`));
     }
   }
 }
@@ -263,29 +278,40 @@ function metadataDir(commonDir: string, checkout: string): string | undefined {
   return undefined;
 }
 
+/** Why the worktree with this metadata mustn't be removed, confirmed or not. */
+function refusal(meta: string): string | undefined {
+  if (fs.existsSync(path.join(meta, "locked"))) return "git 不让移除这个工作区（它被 git worktree lock 锁住了），先在电脑上解锁";
+  if (fs.existsSync(path.join(meta, "modules"))) return "这个工作区里有子模块，它们的提交可能只在这里：请在电脑上处理后再移除";
+  return undefined;
+}
+
 /**
  * Remove the worktree when it holds nothing uncommitted, ignored or unpushed, or when `force` (an Archive the user
  * confirmed) says to drop those files. Commits are never lost to it:
  * - git's metadata for the worktree is moved aside first, so nothing can be committed in it from then on, and the
  *   HEAD read after that is final: commits on a detached HEAD are kept on `<branch>-detached`;
- * - the branch is deleted only when the exact tip checked is in a commit known to be safe (`backedUp`), by
- *   `branch -D`, which refuses a branch checked out anywhere; one that moved meanwhile is put back.
+ * - the branch is deleted only when the exact tip checked is in a commit known to be safe (`backedUp`), only if it
+ *   still points there, and not while it's checked out anywhere (put back if it was checked out meanwhile).
  * A locked worktree, or one holding submodule repositories (their commits may exist nowhere else), is refused
- * whatever `force` says: `blocked` says why. Without `force` the folder is moved to `.trash/` beside it, not
- * deleted, so a file written after the count is there for a week. Throws, removing nothing, when the work can't be
- * checked. `pushed`: the head GitHub merged, if known.
+ * whatever `force` says: `blocked` says why. A folder at the path that git doesn't know as this worktree is left
+ * alone: `unregistered`. Without `force` the checkout is moved to `.mypi-trash/` beside it, not deleted, so a file
+ * written after the count is there for a week. Throws, removing nothing, when the work can't be checked. `pushed`:
+ * the head GitHub merged, if known.
  */
 export async function removeSessionWorktree(
   worktree: SessionWorktree,
   options: { force?: boolean; pushed?: string } = {},
-): Promise<{ removed: boolean; branchDeleted: boolean; work: WorktreeWork; blocked?: string }> {
+): Promise<{ removed: boolean; branchDeleted: boolean; work: WorktreeWork; blocked?: string; unregistered?: boolean }> {
   const gitDir = gitDirOf(worktree);
+  const registered = await registration(worktree);
+  if (!registered && fs.existsSync(worktree.path)) {
+    // A folder git doesn't know as this worktree: not ours to count or delete. The branch stays.
+    return { removed: false, branchDeleted: false, work: { exists: true, uncommitted: 0, ignored: 0, unpushed: 0 }, unregistered: true };
+  }
   const { work, disposable: regenerable } = await inspect(worktree, options.pushed);
   const kept = (blocked?: string) => ({ removed: false, branchDeleted: false, work, ...(blocked ? { blocked } : {}) });
   if (!options.force && work.uncommitted + work.ignored + work.unpushed > 0) return kept();
   const safe = [worktree.baseCommit, worktree.baseRef, options.pushed];
-  const registered = await registration(worktree);
-  if (!registered && work.exists) return kept(); // a folder git doesn't know as this worktree: not ours to delete
   const checkout = registered?.dir ?? worktree.path;
 
   let meta: string | undefined;
@@ -295,13 +321,17 @@ export async function removeSessionWorktree(
     const common = await git(gitDir, ["rev-parse", "--path-format=absolute", "--git-common-dir"]);
     meta = metadataDir(common, registered.dir);
     if (!meta) throw new Error(`Can't find git's metadata for the worktree at ${registered.dir}`);
-    if (fs.existsSync(path.join(meta, "locked"))) return kept("git 不让移除这个工作区（它被 git worktree lock 锁住了），先在电脑上解锁");
-    if (fs.existsSync(path.join(meta, "modules"))) {
-      return kept("这个工作区里有子模块，它们的提交可能只在这里：请在电脑上处理后再移除");
-    }
+    const refused = refusal(meta);
+    if (refused) return kept(refused);
     retired = path.join(common, "mypi-retired", `${path.basename(meta)}-${Date.now()}`);
     fs.mkdirSync(path.dirname(retired), { recursive: true });
     fs.renameSync(meta, retired);
+    // Checked again where nothing can change it any more: a submodule added or a lock taken just before the move.
+    const late = refusal(retired);
+    if (late) {
+      fs.renameSync(retired, meta);
+      return kept(late);
+    }
   }
   try {
     // HEAD as git resolves it from the moved metadata: any object format, any ref storage (reftable's HEAD file
@@ -317,11 +347,25 @@ export async function removeSessionWorktree(
       const taken = await hasRef(gitDir, `refs/heads/${worktree.branch}-detached`);
       await git(gitDir, ["branch", `${worktree.branch}-detached${taken ? `-${head.slice(0, 8)}` : ""}`, head]);
     }
+    // What's staged and not committed: the moved index lists it, but only a ref keeps it from git's garbage
+    // collection. A commit on refs/mypi-retired/<name>, on top of HEAD, expired with the metadata. Without it (a
+    // conflicted index) only a confirmed removal goes on.
+    if (retired) {
+      const staged = await git(gitDir, ["--git-dir", retired, "write-tree"]).catch((err) => {
+        if (options.force) return "";
+        throw err;
+      });
+      if (staged && staged !== (head && (await git(gitDir, ["rev-parse", `${head}^{tree}`])))) {
+        const commit = await git(gitDir, ["-c", "user.name=mypi", "-c", "user.email=mypi@localhost", "commit-tree", staged,
+          ...(head ? ["-p", head] : []), "-m", `mypi: staged in the worktree of ${worktree.branch} when it was removed`]);
+        await git(gitDir, ["update-ref", `refs/mypi-retired/${path.basename(retired).replace(/[^\w.-]/g, "_")}`, commit]);
+      }
+    }
     if (fs.existsSync(checkout) && options.force) {
       fs.rmSync(checkout, { recursive: true, force: true });
     } else if (fs.existsSync(checkout)) {
-      fs.mkdirSync(path.join(path.dirname(checkout), ".trash"), { recursive: true });
-      moved = path.join(path.dirname(checkout), ".trash", `${path.basename(checkout)}-${Date.now()}`);
+      fs.mkdirSync(path.join(path.dirname(checkout), TRASH), { recursive: true });
+      moved = path.join(path.dirname(checkout), TRASH, `${path.basename(checkout)}-${Date.now()}`);
       fs.renameSync(checkout, moved);
     }
   } catch (err) {
@@ -334,19 +378,25 @@ export async function removeSessionWorktree(
     for (const p of regenerable) tidy(`delete ${p} from ${moved}`, () => fs.rmSync(path.join(moved!, p), { recursive: true, force: true }));
     emptyTrash(path.dirname(moved));
   }
-  // The metadata stays (in mypi-retired/ in the git dir) for the same week as the trash: its index has what was
-  // staged, its logs the worktree's HEAD history.
+  // The metadata stays (in mypi-retired/ in the git dir) for the same week as the trash, with its index and HEAD
+  // history; what was staged, for that week, also on its ref.
   if (retired) emptyTrash(path.dirname(retired));
+  await expireStaged(gitDir);
 
-  const tip = await git(gitDir, ["rev-parse", "--verify", "--quiet", `refs/heads/${worktree.branch}^{commit}`]).catch(() => "");
+  const ref = `refs/heads/${worktree.branch}`;
+  const tip = await git(gitDir, ["rev-parse", "--verify", "--quiet", `${ref}^{commit}`]).catch(() => "");
   if (!tip || !(await backedUp(gitDir, tip, safe))) return { removed: true, branchDeleted: false, work };
-  const out = await git(gitDir, ["-c", "core.abbrev=no", "branch", "-D", worktree.branch]).catch(() => "");
-  const was = /\(was ([0-9a-f]+)\)/.exec(out)?.[1];
-  if (was && was !== tip) {
-    // It moved between the check and the delete: put it back, under another name if that's been taken since.
-    await git(gitDir, ["branch", worktree.branch, was])
-      .catch(() => git(gitDir, ["branch", `${worktree.branch}-moved-${was.slice(0, 8)}`, was]))
-      .catch((err) => console.warn(`[mypi-server] ${worktree.branch} moved to ${was} while being deleted, and couldn't be put back: ${firstLine(err)}`));
+  const checkedOut = async () =>
+    (await git(gitDir, ["worktree", "list", "--porcelain", "-z"]).catch(() => `branch ${ref}`)).split("\0").includes(`branch ${ref}`);
+  if (await checkedOut()) return { removed: true, branchDeleted: false, work };
+  // Only if it still points at the tip checked: a commit made meanwhile keeps it.
+  await git(gitDir, ["update-ref", "-d", ref, tip]).catch(() => "");
+  if (await hasRef(gitDir, ref)) return { removed: true, branchDeleted: false, work };
+  if (await checkedOut()) {
+    // Checked out somewhere in the moment between: put it back. Its commits are safe either way (the tip is backed up).
+    await git(gitDir, ["branch", worktree.branch, tip])
+      .catch((err) => console.warn(`[mypi-server] ${worktree.branch} was checked out while being deleted, and couldn't be put back at ${tip}: ${firstLine(err)}`));
+    return { removed: true, branchDeleted: false, work };
   }
-  return { removed: true, branchDeleted: was === tip, work };
+  return { removed: true, branchDeleted: true, work };
 }

@@ -323,6 +323,14 @@ it("archives on request: warns about work first, keeps unpushed commits on the b
     assert.ok(fs.existsSync(locked.worktreePath!), "put back where it was");
     git(repo, "worktree", "unlock", locked.worktreePath!);
 
+    // Its folder replaced by one git doesn't know as this worktree: archived, nothing to confirm, the folder left alone.
+    const foreign = await mgr.createSession({ cwd: repo });
+    git(repo, "worktree", "remove", foreign.worktreePath!);
+    fs.mkdirSync(foreign.worktreePath!);
+    fs.writeFileSync(path.join(foreign.worktreePath!, "mine.txt"), "mine\n");
+    assert.equal((await mgr.archiveSession(foreign.id, {})).archived, true);
+    assert.equal(fs.readFileSync(path.join(foreign.worktreePath!, "mine.txt"), "utf8"), "mine\n");
+
     const readOnly = (err: Error & { status?: number }) => err.status === 409 && /已归档/.test(err.message);
     await assert.rejects(mgr.sendMessage(session.id, { requestId: "r", content: "more" }), readOnly);
     await assert.rejects(mgr.shipSession(session.id, {}), readOnly);

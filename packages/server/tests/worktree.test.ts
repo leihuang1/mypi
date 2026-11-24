@@ -295,8 +295,8 @@ it("loses nothing written after the count: late files go to trash, a late commit
   fs.appendFileSync(path.join(repo, ".git", "info", "exclude"), ".env\n");
   late("status --porcelain", `echo late > "${wt.path}/late.txt"; echo SECRET=1 > "${wt.path}/.env"`);
   assert.equal((await withShim(() => removeSessionWorktree(wt))).removed, true);
-  const [trashed] = fs.readdirSync(path.join(root, ".trash"));
-  assert.deepEqual(["late.txt", ".env"].map((f) => fs.readFileSync(path.join(root, ".trash", trashed, f), "utf8")), ["late\n", "SECRET=1\n"]);
+  const [trashed] = fs.readdirSync(path.join(root, ".mypi-trash"));
+  assert.deepEqual(["late.txt", ".env"].map((f) => fs.readFileSync(path.join(root, ".mypi-trash", trashed, f), "utf8")), ["late\n", "SECRET=1\n"]);
 
   // A commit made after the count: the branch moved, so it isn't deleted.
   const wt2 = (await createSessionWorktree(repo, root, "l2"))!;
@@ -322,10 +322,43 @@ it("loses nothing written after the count: late files go to trash, a late commit
 
   // The branch checked out in the owner's checkout just before it would be deleted: git refuses, and it stays.
   const wt7 = (await createSessionWorktree(repo, root, "l7"))!;
+  // History of its own (moved away and back), which a branch deleted and made again wouldn't have.
+  const b7 = `refs/heads/${wt7.branch}`;
+  const at7 = git(repo, "rev-parse", b7);
+  git(repo, "update-ref", "-m", "away", b7, git(repo, "commit-tree", `${b7}^{tree}`, "-m", "elsewhere"));
+  git(repo, "update-ref", "-m", "back", b7, at7);
+  const history = git(repo, "reflog", "show", "--format=%gs", b7);
   late("merge-base --is-ancestor", `cd "${repo}" && /usr/bin/git checkout -q ${wt7.branch}`);
   assert.equal((await withShim(() => removeSessionWorktree(wt7))).branchDeleted, false);
   assert.equal(git(repo, "rev-parse", "--abbrev-ref", "HEAD"), wt7.branch, "the owner's checkout still has its branch");
+  assert.equal(git(repo, "reflog", "show", "--format=%gs", `refs/heads/${wt7.branch}`), history, "never deleted, so its history is too");
   git(repo, "checkout", "-q", "-");
+
+  // The branch checked out in the owner's checkout in the moment between that check and the delete: it's put back.
+  const wt15 = (await createSessionWorktree(repo, root, "l15"))!;
+  write(path.join(bin, "git"), `#!/bin/sh\ncase "$*" in *"update-ref -d"*) (cd "${repo}" && /usr/bin/git checkout -q ${wt15.branch});; esac\nexec /usr/bin/git "$@"\n`);
+  fs.chmodSync(path.join(bin, "git"), 0o755);
+  assert.equal((await withShim(() => removeSessionWorktree(wt15))).branchDeleted, false);
+  assert.equal(git(repo, "rev-parse", "--abbrev-ref", "HEAD"), wt15.branch);
+  assert.ok(hasBranch(repo, wt15.branch), "the owner's checkout has its branch back");
+  git(repo, "checkout", "-q", "-");
+
+  // Locked (or given a submodule) just as git's metadata is moved: checked again there, and put back.
+  const wt16 = (await createSessionWorktree(repo, root, "l16"))!;
+  const rename = fs.renameSync;
+  fs.renameSync = ((from: fs.PathLike, to: fs.PathLike) => {
+    if (String(to).includes("mypi-retired")) fs.writeFileSync(path.join(String(from), "locked"), "");
+    rename(from, to);
+  }) as typeof fs.renameSync;
+  try {
+    const locked = await removeSessionWorktree(wt16, { force: true });
+    assert.deepEqual([locked.removed, /锁住/.test(locked.blocked ?? "")], [false, true]);
+  } finally {
+    fs.renameSync = rename;
+  }
+  assert.ok(git(repo, "worktree", "list", "--porcelain").includes(wt16.path), "still registered");
+  assert.ok(fs.existsSync(path.join(wt16.path, "README.md")));
+  git(repo, "worktree", "unlock", wt16.path);
 
   // A folder made again at the old path after the move: nothing to roll back, and its file is left alone.
   const wt8 = (await createSessionWorktree(repo, root, "l8"))!;
@@ -340,10 +373,13 @@ it("loses nothing written after the count: late files go to trash, a late commit
   assert.equal((await withShim(() => removeSessionWorktree(wt11))).removed, true);
   const retiredRoot = path.join(repo, ".git", "mypi-retired");
   const retired = fs.readdirSync(retiredRoot).find((name) => name.startsWith(path.basename(wt11.path)))!;
-  const staged = execFileSync("git", ["ls-files", "--cached"], {
+  // Kept by a ref of its own, so git's garbage collection keeps it too, however eager.
+  git(repo, "gc", "-q", "--prune=now");
+  assert.equal(git(repo, "show", `refs/mypi-retired/${retired}:s.txt`), "staged");
+  const staged = execFileSync("git", ["cat-file", "-p", ":s.txt"], {
     cwd: repo, encoding: "utf8", env: { ...process.env, GIT_INDEX_FILE: path.join(retiredRoot, retired, "index") },
   });
-  assert.match(staged, /^s\.txt$/m);
+  assert.equal(staged, "staged\n");
 
   // The catalog's path is now a symlink to where the checkout was moved: the checkout itself goes to trash.
   const wt10 = (await createSessionWorktree(repo, root, "l10"))!;
@@ -352,8 +388,8 @@ it("loses nothing written after the count: late files go to trash, a late commit
   fs.symlinkSync(movedTo, wt10.path);
   late("status --porcelain", `echo late > "${movedTo}/late.txt"`);
   assert.equal((await withShim(() => removeSessionWorktree(wt10))).removed, true);
-  const entry = fs.readdirSync(path.join(dir, ".trash")).find((name) => name.startsWith("moved-l10-"))!;
-  assert.equal(fs.readFileSync(path.join(dir, ".trash", entry, "late.txt"), "utf8"), "late\n");
+  const entry = fs.readdirSync(path.join(dir, ".mypi-trash")).find((name) => name.startsWith("moved-l10-"))!;
+  assert.equal(fs.readFileSync(path.join(dir, ".mypi-trash", entry, "late.txt"), "utf8"), "late\n");
 
   // Two missing worktrees with this folder name, and a spelling that no longer resolves: an error, not "nothing".
   const wt12 = (await createSessionWorktree(repo, root, "l12"))!;
@@ -377,24 +413,41 @@ it("loses nothing written after the count: late files go to trash, a late commit
   assert.deepEqual([refused.removed, /子模块/.test(refused.blocked ?? "")], [false, true]);
   assert.ok(fs.existsSync(path.join(wt9.path, "mod", "s.txt")));
 
-  // Trash older than a week is emptied by the next removal.
-  const old = path.join(root, ".trash", `old-${Date.now() - 8 * 86_400_000}`);
+  // Trash older than a week is emptied by the next removal; a name that isn't one removal gave it is left alone.
+  const old = path.join(root, ".mypi-trash", `old-${Date.now() - 8 * 86_400_000}`);
   fs.mkdirSync(old);
+  write(path.join(root, ".mypi-trash", "notes-2024", "f.txt"), "mine\n");
+  const oldRef = `refs/mypi-retired/old-${Date.now() - 8 * 86_400_000}`;
+  git(repo, "update-ref", oldRef, "HEAD");
   const wt3 = (await createSessionWorktree(repo, root, "l3"))!;
   assert.equal((await removeSessionWorktree(wt3)).branchDeleted, true, "nothing but the base on it");
   assert.equal(fs.existsSync(old), false);
+  assert.equal(fs.readFileSync(path.join(root, ".mypi-trash", "notes-2024", "f.txt"), "utf8"), "mine\n");
+  assert.equal(git(repo, "for-each-ref", oldRef), "", "an expired ref of what was staged is deleted");
   // Old trash that can't be emptied (its contents can't be reached): the removal still finishes, and the checkout's
   // metadata isn't put back over a folder that's already in trash.
-  const stuck = path.join(root, ".trash", `stuck-${Date.now() - 8 * 86_400_000}`);
+  const stuck = path.join(root, ".mypi-trash", `stuck-${Date.now() - 8 * 86_400_000}`);
   write(path.join(stuck, "inner", "f.txt"), "f\n");
   fs.chmodSync(stuck, 0o400);
   const wt13 = (await createSessionWorktree(repo, root, "l13"))!;
   try {
     assert.equal((await removeSessionWorktree(wt13)).removed, true);
     assert.equal(git(repo, "worktree", "list", "--porcelain").includes(wt13.path), false, "not registered again");
-    assert.ok(fs.readdirSync(path.join(root, ".trash")).some((name) => name.startsWith(`${path.basename(wt13.path)}-`)));
+    assert.ok(fs.readdirSync(path.join(root, ".mypi-trash")).some((name) => name.startsWith(`${path.basename(wt13.path)}-`)));
   } finally {
     fs.chmodSync(stuck, 0o700);
+  }
+  // Trash, or the retired metadata's folder, that can be written to but not listed: the same.
+  const retiredDir = path.join(repo, ".git", "mypi-retired");
+  for (const unlistable of [path.join(root, ".mypi-trash"), retiredDir]) {
+    const wt14 = (await createSessionWorktree(repo, root, `l14-${path.basename(unlistable)}`))!;
+    fs.chmodSync(unlistable, 0o300);
+    try {
+      assert.equal((await removeSessionWorktree(wt14)).removed, true, unlistable);
+    } finally {
+      fs.chmodSync(unlistable, 0o755);
+    }
+    assert.equal(git(repo, "worktree", "list", "--porcelain").includes(wt14.path), false);
   }
 
   // A catalog entry from before gitDir and baseCommit were recorded still works, from the checkout.
@@ -422,7 +475,7 @@ it("keeps a detached commit and a moved branch in SHA-256 and reftable repositor
     const wt2 = (await createSessionWorktree(repo, root, "f2"))!;
     const bin = path.join(dir, "bin");
     const ref = `refs/heads/${wt2.branch}`;
-    write(path.join(bin, "git"), `#!/bin/sh\ncase "$*" in *"branch -D"*) cd "${repo}" && n=$(/usr/bin/git commit-tree -p ${ref} -m later "${ref}^{tree}") && /usr/bin/git update-ref ${ref} $n;; esac\nexec /usr/bin/git "$@"\n`);
+    write(path.join(bin, "git"), `#!/bin/sh\ncase "$*" in *"update-ref -d"*) cd "${repo}" && n=$(/usr/bin/git commit-tree -p ${ref} -m later "${ref}^{tree}") && /usr/bin/git update-ref ${ref} $n;; esac\nexec /usr/bin/git "$@"\n`);
     fs.chmodSync(path.join(bin, "git"), 0o755);
     const savedPath = process.env.PATH;
     process.env.PATH = `${bin}:${savedPath}`;
