@@ -487,6 +487,32 @@ it("puts git's metadata back after a failure before the move, even if git's gc r
   assert.ok(git(repo, "worktree", "list", "--porcelain").includes(wt.path));
 });
 
+it("says how to put back a commit made on the branch while it was being deleted", async () => {
+  const { dir, repo } = fixture("root-commit");
+  const wt = (await createSessionWorktree(repo, path.join(dir, "worktrees"), "c1"))!;
+  const tip = git(repo, "rev-parse", wt.branch);
+  // A checkout of it that was still under way when it was deleted, then a commit there: one without history.
+  const bin = path.join(dir, "bin");
+  write(path.join(bin, "git"), `#!/bin/sh\n/usr/bin/git "$@"\nrc=$?\ncase "$*" in *"update-ref -d"*) cd "${repo}" && ` +
+    `/usr/bin/git symbolic-ref HEAD refs/heads/${wt.branch} && echo w > w.txt && /usr/bin/git add w.txt && /usr/bin/git commit -qm owner;; esac\nexit $rc\n`);
+  fs.chmodSync(path.join(bin, "git"), 0o755);
+  const warned: string[] = [];
+  const [savedPath, warn] = [process.env.PATH, console.warn];
+  process.env.PATH = `${bin}:${savedPath}`;
+  console.warn = (...args: unknown[]) => { warned.push(args.map(String).join(" ")); };
+  try {
+    assert.equal((await removeSessionWorktree(wt)).branchDeleted, false);
+  } finally {
+    process.env.PATH = savedPath;
+    console.warn = warn;
+  }
+  assert.equal(git(repo, "log", "-1", "--format=%s", wt.branch), "owner", "the owner's commit is there");
+  assert.ok(warned.some((w) => w.includes(`git rebase --root --onto ${tip} ${wt.branch}`)), warned.join("\n"));
+  // And that command does it.
+  git(repo, "rebase", "-q", "--root", "--onto", tip, wt.branch);
+  assert.equal(git(repo, "rev-parse", `${wt.branch}~1`), tip);
+});
+
 it("keeps an old detached commit even if git's gc runs just as the metadata moves", async () => {
   const { dir, repo } = fixture("old-detached");
   const wt = (await createSessionWorktree(repo, path.join(dir, "worktrees"), "o1"))!;

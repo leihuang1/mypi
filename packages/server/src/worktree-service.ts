@@ -409,7 +409,16 @@ export async function removeSessionWorktree(
   if (await checkedOut()) return { removed: true, branchDeleted: false, work };
   // Only if it still points at the tip checked: a commit made meanwhile keeps it.
   await git(gitDir, ["update-ref", "-d", ref, tip]).catch(() => "");
-  if (await hasRef(gitDir, ref)) return { removed: true, branchDeleted: false, work };
+  const now = await git(gitDir, ["rev-parse", "--verify", "--quiet", `${ref}^{commit}`]).catch(() => "");
+  if (now) {
+    // Kept, or made again meanwhile by a commit in a checkout of it that was still under way: a commit with no branch
+    // to build on, so without its history. Rebasing puts it back on it (not done here: it's the owner's commit).
+    if (now !== tip && !(await git(gitDir, ["merge-base", "--is-ancestor", tip, now]).then(() => true, () => false))) {
+      console.warn(`[mypi-server] ${worktree.branch} got commit ${now} while being deleted, without its history: ` +
+        `\`git rebase --root --onto ${tip} ${worktree.branch}\` puts it back on it`);
+    }
+    return { removed: true, branchDeleted: false, work };
+  }
   if (await checkedOut()) {
     // Checked out somewhere in the moment between: put it back. Its commits are safe either way (the tip is backed up).
     await git(gitDir, ["branch", worktree.branch, tip])
