@@ -499,7 +499,8 @@ it("says how to put back a commit made on the branch while it was being deleted,
   // A checkout of it that was still under way when it was deleted, then a commit there: one without history.
   const bin = path.join(dir, "bin");
   write(path.join(bin, "git"), `#!/bin/sh\n/usr/bin/git "$@"\nrc=$?\ncase "$*" in *"--no-deref -d"*) cd "${repo}" && ` +
-    `/usr/bin/git symbolic-ref HEAD refs/heads/${wt.branch} && echo w > w.txt && /usr/bin/git add w.txt && /usr/bin/git commit -qm owner;; esac\nexit $rc\n`);
+    `/usr/bin/git symbolic-ref HEAD refs/heads/${wt.branch} && echo w > w.txt && /usr/bin/git add w.txt && /usr/bin/git rm -qf README.md && ` +
+    `/usr/bin/git commit -qm owner;; esac\nexit $rc\n`);
   fs.chmodSync(path.join(bin, "git"), 0o755);
   const warned: string[] = [];
   const [savedPath, warn] = [process.env.PATH, console.warn];
@@ -512,11 +513,15 @@ it("says how to put back a commit made on the branch while it was being deleted,
     console.warn = warn;
   }
   assert.equal(git(repo, "log", "-1", "--format=%s", wt.branch), "owner", "the owner's commit is there");
-  assert.ok(warned.some((w) => w.includes(`git rebase --root --onto ${tip} ${wt.branch}`)), warned.join("\n"));
-  // And that command does it.
-  git(repo, "rebase", "-q", "--root", "--onto", tip, wt.branch);
+  const owner = git(repo, "rev-parse", wt.branch);
+  const advice = warned.map((w) => /`(git update-ref .*)`$/.exec(w)?.[1]).find(Boolean);
+  assert.ok(advice, warned.join("\n"));
+  // And that command does it: the same files (README.md stays deleted) and message, on top of the tip.
+  execFileSync("sh", ["-c", advice!], { cwd: repo, stdio: "pipe" });
   assert.equal(git(repo, "rev-parse", `${wt.branch}~1`), tip);
-  git(repo, "checkout", "-q", "main");
+  assert.equal(git(repo, "rev-parse", `${wt.branch}^{tree}`), git(repo, "rev-parse", `${owner}^{tree}`));
+  assert.equal(git(repo, "log", "-1", "--format=%s", wt.branch), "owner");
+  git(repo, "checkout", "-q", "-f", "main");
 
   // Moved back to an older commit just before the delete: the delete is refused, and there's nothing to put back.
   upstream("r.txt", "r\n");

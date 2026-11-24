@@ -408,11 +408,14 @@ export async function removeSessionWorktree(
   const now = await git(gitDir, ["rev-parse", "--verify", "--quiet", `${ref}^{commit}`]).catch(() => "");
   if (now) {
     // Moved, so kept. Or deleted and then made again, by a commit in a checkout of it that was still under way: that
-    // commit had no branch to build on. Rebasing puts it on its history (not done here: it's the owner's commit).
+    // commit had no branch to build on. The same commit (its tree, its message) on top of the tip puts it back on its
+    // history; a rebase wouldn't, since a commit without a parent has no changes to replay, only files. Not done here:
+    // it's the owner's commit.
     const parentless = (await git(gitDir, ["rev-list", "--parents", "-n", "1", now]).catch(() => "")).split(" ").length === 1;
     if (deleted && now !== tip && parentless) {
-      console.warn(`[mypi-server] ${worktree.branch} was made again at ${now} while being deleted, by a commit that ` +
-        `doesn't build on ${tip}; if it should, \`git rebase --root --onto ${tip} ${worktree.branch}\``);
+      console.warn(`[mypi-server] ${worktree.branch} was made again at ${now} while being deleted, by a commit without ` +
+        `history; to put it on top of ${tip} as it is: \`git update-ref ${ref} "$(git commit-tree ${now}^{tree} -p ${tip} ` +
+        `-m "$(git log -1 --format=%B ${now})")" ${now}\``);
     }
     return { removed: true, branchDeleted: false, work };
   }
